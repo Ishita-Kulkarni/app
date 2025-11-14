@@ -26,7 +26,7 @@ app.logger.setLevel(logging.INFO)
 # Global plotting / time configuration (UNIFORM)
 # -------------------------
 GLOBAL_T_COMMON = np.linspace(0.0, 30.0, 400)  # minutes for webpage plots
-PLOT_FIGSIZE = (12, 6)
+PLOT_FIGSIZE = (14, 6)  # Increased width to accommodate legend
 PLOT_DPI = 120
 PLOT_LINEWIDTH = 1.8
 PLOT_GRID_STYLE = {'linestyle': '--', 'alpha': 0.6}
@@ -603,12 +603,16 @@ def solve_dermal_absorption_original(MW, logKow, Pvap, Sw, Mo=1e-3, tf_hours=25.
         return t / 3600.0, Qt, Qet
 
 
-def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0):
+def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0, custom_solubility=None):
     """Plot all selected agents with clean styling:
     - Each agent gets one color; styles indicate quantity: Qabs (-), Qevap (--), Qtotal (:)
     - Legend shows agent names once plus a compact style key for the three quantities
     - Right axis shows percentage of initial dose linked to the left axis scale
+    - custom_solubility: dict mapping agent names to solubility values (mg/cm³)
     """
+    if custom_solubility is None:
+        custom_solubility = {}
+    
     fig, ax = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     cmap = plt.get_cmap('tab10')
 
@@ -625,7 +629,13 @@ def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0):
             logP = float(agent[3])
 
             props = get_agent_data(name)
-            Sw = float(props.get('Sw', 1.0) or 1.0)
+            
+            # Use custom solubility if provided, otherwise get from data
+            if name in custom_solubility:
+                Sw = float(custom_solubility[name])
+            else:
+                Sw = float(props.get('Sw', 1.0) or 1.0)
+            
             # Try CSV first, then PubChem, then default
             Pvap = props.get('Pvap')
             if Pvap is None:
@@ -691,7 +701,8 @@ def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0):
     style_labels = ['Qabs', 'Qevap', 'Qtotal']
 
     ax.legend(handles_agents + style_handles, labels_agents + style_labels,
-              fontsize=PLOT_LEGEND_FS, frameon=True, loc='upper left', bbox_to_anchor=(1.02, 1.0))
+              fontsize=PLOT_LEGEND_FS, frameon=True, loc='center left', 
+              bbox_to_anchor=(1.15, 0.5), borderaxespad=0, ncol=1)
 
     # Limits and title
     ax.set_xlim(left=0.0)
@@ -708,7 +719,11 @@ def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0):
         ax.set_ylim(bottom=0.0, top=ymax)
 
     ax.set_title("Dermal absorption model", fontsize=PLOT_TITLE_FS + 2)
-    plt.tight_layout(rect=[0, 0, 0.78, 1.0])
+    apply_uniform_style(ax)
+    
+    # Adjust layout to prevent legend overlap - leave space on the right
+    plt.subplots_adjust(right=0.75)
+    
     return fig_to_base64(fig)
 
 
@@ -917,11 +932,22 @@ def index():
     applied_dose = ""
     agent_info = []
     combined_images = {'abs_vs_evap': None}
+    missing_solubility = []  # Track agents with missing solubility
+    custom_solubility = {}  # Store custom solubility values
 
     if request.method == 'POST':
         selected_agents = request.form.getlist('agents')
         other_agents = request.form.get('other_agents', '')
         applied_dose = request.form.get('applied_dose', '0')
+        
+        # Collect custom solubility values from form
+        for key in request.form:
+            if key.startswith('solubility_'):
+                agent_name = key.replace('solubility_', '', 1)
+                try:
+                    custom_solubility[agent_name] = float(request.form[key])
+                except ValueError:
+                    pass
 
         try:
             dose = float(applied_dose)
@@ -965,7 +991,38 @@ def index():
         if not agents_to_run:
             agents_to_run = agent_properties
 
-        # compute Msat / status for each agent
+        # First pass: check for missing solubility
+        for ag in agents_to_run:
+            name = ag[0]
+            props = get_agent_data(name)
+            Sw = props.get('Sw')
+            
+            # Check if custom solubility provided
+            if name in custom_solubility:
+                Sw = custom_solubility[name]
+            elif Sw is None:
+                # Mark as missing and skip computation for now
+                missing_solubility.append(name)
+        
+        # If we have missing solubility values, return early with prompt
+        if missing_solubility:
+            # Build agent list for dropdown
+            if df_agents is not None:
+                name_col = df_agents_canonmap.get('name', df_agents.columns[0])
+                agent_list = df_agents[name_col].astype(str).tolist()
+            else:
+                agent_list = [a[0] for a in agent_properties]
+            
+            return render_template('index.html',
+                                agent_list=agent_list,
+                                selected_agents=selected_agents,
+                                other_agents=other_agents,
+                                applied_dose=applied_dose,
+                                agent_info=agent_info,
+                                combined_images=combined_images,
+                                missing_solubility=missing_solubility)
+        
+        # Second pass: compute Msat / status for each agent
         for ag in agents_to_run:
             name = ag[0]
             mw = float(ag[1]) if len(ag) > 1 else None
@@ -973,8 +1030,12 @@ def index():
 
             props = get_agent_data(name)
             Sw = props.get('Sw')
-            if Sw is None:
-                Sw = 1.0
+            
+            # Use custom solubility if provided
+            if name in custom_solubility:
+                Sw = custom_solubility[name]
+            elif Sw is None:
+                Sw = 1.0  # Should not reach here after first pass check
             else:
                 Sw = float(Sw)
 
@@ -1016,7 +1077,9 @@ def index():
         # Dermal absorption graph only (original ODE-based model)
         try:
             # Use a 25-hour horizon as per original code
-            combined_images['abs_vs_evap'] = combined_plot_dermal_absorption_original(agents_to_run, Mo=dose, tf_hours=25.0)
+            combined_images['abs_vs_evap'] = combined_plot_dermal_absorption_original(
+                agents_to_run, Mo=dose, tf_hours=25.0, custom_solubility=custom_solubility
+            )
         except Exception as e:
             app.logger.error('Dermal absorption plotting failed: %s', e)
             agent_info.append(f'Dermal absorption plot error: {e}')
@@ -1034,7 +1097,8 @@ def index():
                             other_agents=other_agents,
                             applied_dose=applied_dose,
                             agent_info=agent_info,
-                            combined_images=combined_images)
+                            combined_images=combined_images,
+                            missing_solubility=[])
 
 
 if __name__ == "__main__":
