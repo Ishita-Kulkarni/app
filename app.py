@@ -23,9 +23,8 @@ logging.basicConfig(level=logging.INFO)
 app.logger.setLevel(logging.INFO)
 
 # -------------------------
-# Global plotting / time configuration (UNIFORM)
+# Global plotting configuration
 # -------------------------
-GLOBAL_T_COMMON = np.linspace(0.0, 30.0, 400)  # minutes for webpage plots
 PLOT_FIGSIZE = (14, 6)  # Increased width to accommodate legend
 PLOT_DPI = 120
 PLOT_LINEWIDTH = 1.8
@@ -198,7 +197,8 @@ def get_canonical_value(row, canon_key):
 
 
 def get_agent_data(agent_name):
-    props = {'MW': None, 'logP': None, 'Sw': None, 'CAS': None, 'SMILES': None, 'formula': None}
+    props = {'MW': None, 'logP': None, 'Sw': None, 'CAS': None, 'SMILES': None, 'formula': None,
+             'nc': None, 'nh': None, 'no': None, 'nn': None, 'nring': None}
 
     if df_agents is not None:
         try:
@@ -227,6 +227,13 @@ def get_agent_data(agent_name):
                 if formula is None:
                     formula = safe_get_from_row(row0, ['formula', 'Formula', 'MolecularFormula'])
                 pvap = get_canonical_value(row0, 'pvap')
+                
+                # Try to get atom counts directly from CSV
+                nc_val = safe_get_from_row(row0, ['nc', 'nC', 'n_c', 'carbon_count'])
+                nh_val = safe_get_from_row(row0, ['nh', 'nH', 'n_h', 'hydrogen_count'])
+                no_val = safe_get_from_row(row0, ['no', 'nO', 'n_o', 'oxygen_count'])
+                nn_val = safe_get_from_row(row0, ['nn', 'nN', 'n_n', 'nitrogen_count'])
+                nring_val = safe_get_from_row(row0, ['nring', 'nRing', 'n_ring', 'ring_count'])
 
                 try:
                     if mw is not None and str(mw).strip().lower() not in ('none', 'nan', ''):
@@ -240,7 +247,8 @@ def get_agent_data(agent_name):
                     pass
                 try:
                     if sw is not None and str(sw).strip().lower() not in ('none', 'nan', ''):
-                        props['Sw'] = float(sw)
+                        # CSV stores solubility in mg/L, convert to mg/cm³ (divide by 1000)
+                        props['Sw'] = float(sw) / 1000.0
                 except:
                     pass
                 try:
@@ -254,6 +262,33 @@ def get_agent_data(agent_name):
                     props['SMILES'] = str(smiles)
                 if formula is not None:
                     props['formula'] = str(formula)
+                
+                # Store atom counts if found in CSV
+                try:
+                    if nc_val is not None and str(nc_val).strip().lower() not in ('none', 'nan', ''):
+                        props['nc'] = int(float(nc_val))
+                except:
+                    pass
+                try:
+                    if nh_val is not None and str(nh_val).strip().lower() not in ('none', 'nan', ''):
+                        props['nh'] = int(float(nh_val))
+                except:
+                    pass
+                try:
+                    if no_val is not None and str(no_val).strip().lower() not in ('none', 'nan', ''):
+                        props['no'] = int(float(no_val))
+                except:
+                    pass
+                try:
+                    if nn_val is not None and str(nn_val).strip().lower() not in ('none', 'nan', ''):
+                        props['nn'] = int(float(nn_val))
+                except:
+                    pass
+                try:
+                    if nring_val is not None and str(nring_val).strip().lower() not in ('none', 'nan', ''):
+                        props['nring'] = int(float(nring_val))
+                except:
+                    pass
         except Exception as e:
             app.logger.debug("CSV lookup exception: %s", e)
 
@@ -278,23 +313,134 @@ def get_agent_data(agent_name):
                     props['SMILES'] = str(smiles_val)
             if props['formula'] is None and getattr(c, 'molecular_formula', None):
                 props['formula'] = c.molecular_formula
-
-    # Try to fetch aqueous solubility if not present
-    if props['Sw'] is None:
+    
+    # Parse atom counts from formula or SMILES if not directly available
+    if any(props[k] is None for k in ('nc', 'nh', 'no', 'nn')):
+        atom_counts = None
+        if props['formula']:
+            atom_counts = parse_molecular_formula(props['formula'])
+        elif props['SMILES']:
+            atom_counts = get_atom_counts_from_smiles(props['SMILES'])
+        
+        if atom_counts:
+            if props['nc'] is None:
+                props['nc'] = atom_counts.get('nc', 0)
+            if props['nh'] is None:
+                props['nh'] = atom_counts.get('nh', 0)
+            if props['no'] is None:
+                props['no'] = atom_counts.get('no', 0)
+            if props['nn'] is None:
+                props['nn'] = atom_counts.get('nn', 0)
+    
+    # Try to calculate nring from SMILES if not available
+    if props['nring'] is None and props['SMILES']:
         try:
-            c2 = pcp.get_properties('AqueousSolubility', agent_name, 'name')
-            if c2 and isinstance(c2, list) and len(c2) > 0:
-                sol = c2[0].get('AqueousSolubility', None)
-                if sol is not None:
+            props['nring'] = count_rings_from_smiles(props['SMILES'])
+        except:
+            props['nring'] = 0
+    
+    # Default atom counts to 0 if still missing
+    if props['nc'] is None:
+        props['nc'] = 0
+    if props['nh'] is None:
+        props['nh'] = 0
+    if props['no'] is None:
+        props['no'] = 0
+    if props['nn'] is None:
+        props['nn'] = 0
+    if props['nring'] is None:
+        props['nring'] = 0
+
+    # WARNING: PubChem solubility values are bulk aqueous solubility, NOT SC-effective solubility!
+    # The model requires SC (stratum corneum) effective solubility which is typically
+    # 10-1000x lower than bulk aqueous values. For accurate results, manually provide Sw values.
+    # This automated fetch is provided only as a rough fallback and may produce incorrect results.
+    if props['Sw'] is None:
+        c_for_sol = pubchem_lookup(agent_name)
+        if c_for_sol:
+            # Try to get solubility from compound record (experimental data section)
+            # Note: This returns mg/L typically, we convert to mg/mL (= mg/cm³)
+            try:
+                # PubChem stores solubility in experimental properties, not as a simple field
+                # We'll attempt basic lookup but warn user this needs manual verification
+                sol_mg_per_L = getattr(c_for_sol, 'solubility', None)
+                if sol_mg_per_L and isinstance(sol_mg_per_L, (int, float, str)):
                     try:
-                        sfloat = float(sol)
-                        props['Sw'] = sfloat / 1000.0 if sfloat > 100 else sfloat
-                    except:
+                        val = float(sol_mg_per_L)
+                        # Convert mg/L to mg/cm³: divide by 1000
+                        props['Sw'] = val / 1000.0
+                        app.logger.warning(f"Using PubChem bulk aqueous solubility for {agent_name}: {val} mg/L = {props['Sw']} mg/cm³. This may NOT be SC-effective solubility!")
+                    except (ValueError, TypeError):
                         pass
-        except Exception:
-            pass
+            except Exception as e:
+                app.logger.debug(f"Could not fetch PubChem solubility for {agent_name}: {e}")
 
     return props
+
+
+# -------------------------
+# Helper: parse molecular formula to get atom counts
+# -------------------------
+def parse_molecular_formula(formula):
+    """
+    Parse molecular formula string to extract atom counts.
+    Returns dict with keys: nc, nh, no, nn (carbon, hydrogen, oxygen, nitrogen)
+    Example: "C3H8O" -> {'nc': 3, 'nh': 8, 'no': 1, 'nn': 0}
+    """
+    import re
+    if not formula or not isinstance(formula, str):
+        return {'nc': 0, 'nh': 0, 'no': 0, 'nn': 0}
+    
+    counts = {'nc': 0, 'nh': 0, 'no': 0, 'nn': 0}
+    
+    # Pattern: Element followed by optional number
+    # Matches: C3, H8, O, N2, etc.
+    pattern = r'([A-Z][a-z]?)(\d*)'
+    matches = re.findall(pattern, formula)
+    
+    for element, count_str in matches:
+        count = int(count_str) if count_str else 1
+        if element == 'C':
+            counts['nc'] += count
+        elif element == 'H':
+            counts['nh'] += count
+        elif element == 'O':
+            counts['no'] += count
+        elif element == 'N':
+            counts['nn'] += count
+    
+    return counts
+
+
+def get_atom_counts_from_smiles(smiles):
+    """
+    Estimate atom counts from SMILES string.
+    This is a simple character-counting approach.
+    """
+    if not smiles or not isinstance(smiles, str):
+        return {'nc': 0, 'nh': 0, 'no': 0, 'nn': 0}
+    
+    # Simple counting (not perfect but reasonable)
+    nc = smiles.count('C') + smiles.count('c')  # aromatic and aliphatic
+    nh = smiles.count('H')
+    no = smiles.count('O') + smiles.count('o')
+    nn = smiles.count('N') + smiles.count('n')
+    
+    return {'nc': nc, 'nh': nh, 'no': no, 'nn': nn}
+
+
+def count_rings_from_smiles(smiles):
+    """
+    Count rings in SMILES by counting ring closure digits.
+    Each unique digit represents a ring closure.
+    """
+    if not smiles or not isinstance(smiles, str):
+        return 0
+    import re
+    # Find all ring digits (1-9 or %10-%99)
+    ring_digits = re.findall(r'%\d\d|\d', smiles)
+    # Count unique ring closures (each appears twice in SMILES)
+    return len(set(ring_digits))
 
 
 # -------------------------
@@ -306,8 +452,6 @@ def compute_Msat_from_logP_sw(logP, Sw, fdep=0.1, hsc=13.4e-4):
     Csat = Kscw * Sw
     Msat = fdep * hsc * Csat
     return Msat, Kscw, Csat
-
-KBDO = 1.25  # retained for compatibility with existing parameter calculations
 
 agent_properties = [
     ("Sarin (GB)", 140.09, 1.1, 0.30, 9.0),
@@ -321,138 +465,236 @@ agent_properties = [
     ("T-2 Toxin", 466.6, 1.15, 2.27, 0.15),
 ]
 
-agentAbsorptionRates = {
-    "Sarin (GB)": 3.0e-6,
-    "Tabun (GA)": 2.0e-6,
-    "Soman (GD)": 4.0e-6,
-    "Cyclosarin (GF)": 2.5e-6,
-    "VX": 150e-6,
-    "VR": 120e-6,
-    "HD (Mustard)": 50e-6,
-    "Lewisite (L)": 30e-6,
-    "T-2 Toxin": 10e-6,
-}
-
-
-def get_ka(agent):
-    return agentAbsorptionRates.get(agent, 1e-6)
-
-
-def calculate_values(name, mw, rho, logP, kObs):
-    Kow = 10 ** logP
-    BF = 1.37 * 4.2 * Kow ** 0.31
-    phiaq = 0.6
-    Kscw = (1 - 0.613) * BF + phiaq
-    logPscw = -2.8 + (0.66 * logP) - (0.0056 * mw)
-    Pscw = 10 ** logPscw
-    Dsc = (Pscw * L * 100) / Kscw
-    Dskin = Dsc / 3600.0
-    DskinM = Dskin * 1e-4
-    kp = (DskinM * Kow) / L
-    kr = kObs / KBDO
-    return Dskin, Kow, kp, kr
-
-
 ############################################################
-# Dermal absorption model (Original ODE-based implementation)
+# Dermal absorption model (ODE-based implementation matching reference)
 ############################################################
 
-def solve_dermal_absorption_original(MW, logKow, Pvap, Sw, Mo=1e-3, tf_hours=25.0):
+def solve_dermal_absorption_original(MW, logKow, Pvap, Sw, Mo=1e-3, tf_hours=25.0, 
+                                     nc=None, nh=None, no=None, nn=None, nring=None,
+                                     formula=None, smiles=None):
     """
     Solve the dermal absorption model from the original script for a single agent.
     Returns t_hours, Qt (absorbed), Qet (evaporated).
+    
+    Parameters:
+    -----------
+    nc, nh, no, nn, nring: atom counts (preferred, passed directly from get_agent_data)
+    formula: molecular formula string (e.g., "C4H10O2PS2" for VX) - fallback if atom counts not provided
+    smiles: SMILES string as fallback for atom counts
     """
-    # Structural parameters (can be extended to infer from SMILES; using mild defaults)
-    nc = 3
-    nh = 8
-    no = 1
-    nn = 0
-    nring = 0
+    # Use provided atom counts or calculate from formula/SMILES
+    if nc is None or nh is None or no is None or nn is None:
+        if formula:
+            atom_counts = parse_molecular_formula(formula)
+        elif smiles:
+            atom_counts = get_atom_counts_from_smiles(smiles)
+        else:
+            raise ValueError(f"Cannot calculate atom counts: nc/nh/no/nn not provided and formula/SMILES both missing")
+        
+        nc = atom_counts.get('nc', 0) if nc is None else nc
+        nh = atom_counts.get('nh', 0) if nh is None else nh
+        no = atom_counts.get('no', 0) if no is None else no
+        nn = atom_counts.get('nn', 0) if nn is None else nn
+    
+    # Calculate nring from SMILES if not provided
+    if nring is None:
+        if smiles:
+            try:
+                nring = count_rings_from_smiles(smiles)
+            except:
+                nring = 0
+        else:
+            nring = 0
 
-    # System parameters
-    hsc = 13.4e-4  # cm
-    h1 = hsc
-    fdep = 0.1
-    tf = float(tf_hours) * 3600.0
+    # System parameters (EXACTLY matching reference code)
+    hsc = 13.4 * 1e-4  # Stratum corneum thickness (cm)
+    h1 = hsc           # Thickness (cm)
+    fdep = 0.1         # Fraction of depletion layer
+    tf = float(tf_hours) * 3600.0  # Total simulation time (seconds)
 
-    # Environment for evaporation
-    u = 16.5  # cm/s
-    L_air = 13.4  # cm
-    R = 62.37  # mL·Torr/K·mmol
-    T = 298.15
+    # Environmental parameters for evaporation (EXACTLY matching reference)
+    u = 16.5      # Air velocity (cm/s)
+    L = 13.4      # Length scale (cm)
+    R = 62.37     # Gas constant (mL·Torr/K·mmol)
+    T = 298.15    # Temperature (K)
 
-    # Calculated transport properties
-    Kow = 10.0 ** logKow
-    Kscw = 0.040 * Kow ** 0.81 + 4.06 * Kow ** 0.27 + 0.359
-    Csat = Kscw * Sw
-    logPscw = -2.8 + 0.66 * logKow - 0.0056 * MW
-    Pscw = 10 ** logPscw
+    # Calculated transport properties (EXACTLY matching reference)
+    Kow = 10**logKow
+    Kscw = 0.040 * Kow**0.81 + 4.06 * Kow**0.27 + 0.359
+    Ksc = Kscw
+    Csat = Ksc * Sw
+
+    # Permeability and diffusion (EXACTLY matching reference)
+    logPscw = -2.8 + 0.66*logKow - 0.0056*MW
+    Pscw = 10**logPscw
     kp = Pscw
-    D1 = (Pscw * h1 / Kscw) / 3600.0
+    D1 = (Pscw * h1 / Kscw) / 3600
+    Dsc = D1
+    dif1 = Dsc
 
-    # Gas phase transport
-    Vp = Pvap  # torr
-    S = 16.5 * nc + 1.98 * nh + 5.69 * nn + 5.48 * no - 20.42 * nring
-    Dg = (10 ** (-3) * T ** 1.75 * (1 / 29 + 1 / MW) ** 0.5) / (S ** (1 / 3) + (20.1) ** (1 / 3)) ** 2
-    kg = (3260 / 3600) * Dg ** (2 / 3) * np.sqrt(u / L_air)
-    K = (kg * Vp * MW) / (R * T) * 1.0 / (kp * Sw)
+    # Gas phase transport for evaporation (EXACTLY matching reference)
+    Vp = Pvap * 133.322  # Convert torr to Pa
+    S = 16.5*nc + 1.98*nh + 5.69*nn + 5.48*no - 20.42*nring
+    Dg = (10**(-3) * T**1.75 * (1/29 + 1/MW)**(1/2)) / (S**(1/3) + (20.1)**(1/3))**2
+    kg = (3260/3600) * Dg**(2/3) * np.sqrt(u/L)
+    K = (kg * Pvap * MW) / (R * T) * 1 / (kp * Sw)
     chi = K
+    
+    # Atom counts calculated: nc={nc}, nh={nh}, no={no}, nn={nn}, nring={nring}
 
+    # System properties (EXACTLY matching reference)
     Msat = fdep * hsc * Csat
     Msurfo = Mo - Msat
-    kevaprho = chi * D1 * Csat / hsc
+    kevaprho = chi * Dsc * Csat / hsc
+    
+    # Log key parameters
+    app.logger.info(f"logKow={logKow:.3f}, MW={MW:.2f}")
+    app.logger.info(f"logPscw={logPscw:.3f}, Pscw={Pscw:.3e}")
+    app.logger.info(f"Kscw={Kscw:.3f}, h1={h1:.3e}")
+    app.logger.info(f"D1={D1:.3e}, Dsc={D1:.3e}")
+    app.logger.info(f"Mo = {Mo:.2e} mg/cm², Msat = {Msat:.6f} mg/cm²")
 
     # Decide regime
     use_above = bool(Mo > Msat)
 
     if use_above:
-        # Above saturation ODEs (phase 1) - derived system
+        # PHASE 1 DIFFERENTIAL EQUATIONS (PERFECT SINK) - EXACTLY matching reference
         def differential_system(t, y):
             Ts2, Ts3, Ts4, Ts5, Ts6, Ts7, Ts8, Ts9, Ts10, Ts11, Qt, Qst = y
-            denom = (h1 - fdep * hsc) ** 2
-            # Precomputed coefficients as per original derivation
-            dTs2_dt = (1 / denom) * D1 * (0.0 + 3699.34 * Csat - 4857.68 * Ts2 + 1398.55 * Ts3 -
-                                          339.574 * Ts4 + 155.38 * Ts5 - 94.1732 * Ts6 + 68.0747 * Ts7 -
-                                          56.3546 * Ts8 + 52.8474 * Ts9 - 57.2106 * Ts10 + 79.6158 * Ts11)
-            dTs3_dt = (1 / denom) * D1 * (0.0 - 216.102 * Csat + 623.883 * Ts2 - 666.927 * Ts3 +
-                                          314.69 * Ts4 - 79.6341 * Ts5 + 38.4789 * Ts6 - 24.8625 * Ts7 +
-                                          19.3336 * Ts8 - 17.4769 * Ts9 + 18.5229 * Ts10 - 25.5064 * Ts11)
-            dTs4_dt = (1 / denom) * D1 * (0.0 + 51.3576 * Csat - 103.349 * Ts2 + 214.683 * Ts3 -
-                                          290.794 * Ts4 + 156.338 * Ts5 - 40.8813 * Ts6 + 20.5419 * Ts7 -
-                                          14.0087 * Ts8 + 11.7504 * Ts9 - 11.934 * Ts10 + 16.0906 * Ts11)
-            dTs5_dt = (1 / denom) * D1 * (0.0 - 21.3451 * Csat + 38.4943 * Ts2 - 44.2193 * Ts3 +
-                                          127.211 * Ts4 - 188.669 * Ts5 + 108.676 * Ts6 - 29.5263 * Ts7 +
-                                          15.5706 * Ts8 - 11.4047 * Ts9 + 10.7477 * Ts10 - 13.9713 * Ts11)
-            dTs6_dt = (1 / denom) * D1 * (0.0 + 12.362 * Csat - 21.2652 * Ts2 + 19.4771 * Ts3 -
-                                          30.3147 * Ts4 + 99.0212 * Ts5 - 155.568 * Ts6 + 94.3278 * Ts7 -
-                                          26.904 * Ts8 + 15.2359 * Ts9 - 12.5905 * Ts10 + 15.3766 * Ts11)
-            dTs7_dt = (1 / denom) * D1 * (0.0 - 9.15831 * Csat + 15.3765 * Ts2 - 12.5905 * Ts3 +
-                                          15.2361 * Ts4 - 26.9043 * Ts5 + 94.3281 * Ts6 - 155.568 * Ts7 +
-                                          99.0218 * Ts8 - 30.3155 * Ts9 + 19.4782 * Ts10 - 21.267 * Ts11)
-            dTs8_dt = (1 / denom) * D1 * (0.0 + 8.43803 * Csat - 13.9738 * Ts2 + 10.7495 * Ts3 -
-                                          11.4063 * Ts4 + 15.5722 * Ts5 - 29.5281 * Ts6 + 108.678 * Ts7 -
-                                          188.671 * Ts8 + 127.214 * Ts9 - 44.2228 * Ts10 + 38.4997 * Ts11)
-            dTs9_dt = (1 / denom) * D1 * (0.0 - 9.80631 * Csat + 16.1085 * Ts2 - 11.9465 * Ts3 +
-                                          11.7612 * Ts4 - 14.0191 * Ts5 + 20.5525 * Ts6 - 40.8927 * Ts7 +
-                                          156.351 * Ts8 - 290.809 * Ts9 + 214.702 * Ts10 - 103.378 * Ts11)
-            dTs10_dt = (1 / denom) * D1 * (0.0 + 15.6376 * Csat - 25.5668 * Ts2 + 18.5648 * Ts3 -
-                                           17.5131 * Ts4 + 19.3681 * Ts5 - 24.8978 * Ts6 + 38.5167 * Ts7 -
-                                           79.6766 * Ts8 + 314.74 * Ts9 - 666.991 * Ts10 + 623.98 * Ts11)
-            dTs11_dt = (1 / denom) * D1 * (0.0 - 48.899 * Csat + 79.7604 * Ts2 - 57.3114 * Ts3 +
-                                           52.935 * Ts4 - 56.4392 * Ts5 + 68.1623 * Ts6 - 94.2691 * Ts7 +
-                                           155.491 * Ts8 - 339.708 * Ts9 + 1398.72 * Ts10 - 4857.95 * Ts11)
-            dQt_dt = -(1 / (h1 - fdep * hsc)) * D1 * (0.0 - 0.999885 * Csat + 1.63008 * Ts2 -
-                                                      1.16854 * Ts3 + 1.07425 * Ts4 - 1.1361 * Ts5 +
-                                                      1.35336 * Ts6 - 1.82683 * Ts7 + 2.87424 * Ts8 -
-                                                      5.62786 * Ts9 + 16.1529 * Ts10 - 123.326 * Ts11)
-            dQst_dt = -kevaprho + (1 / (h1 - fdep * hsc)) * D1 * (0.0 - 110.997 * Csat +
-                                                                   123.321 * Ts2 - 16.1502 * Ts3 +
-                                                                   5.62579 * Ts4 - 2.87258 * Ts5 +
-                                                                   1.82542 * Ts6 - 1.3521 * Ts7 +
-                                                                   1.13491 * Ts8 - 1.07303 * Ts9 +
-                                                                   1.16715 * Ts10 - 1.6281 * Ts11)
-            return [dTs2_dt, dTs3_dt, dTs4_dt, dTs5_dt, dTs6_dt, dTs7_dt, dTs8_dt, dTs9_dt, dTs10_dt, dTs11_dt, dQt_dt, dQst_dt]
+            denom = (h1 - fdep * hsc)**2
+            
+            dTs2_dt = (1/denom) * dif1 * (0.0 + 3699.34*Csat - 4857.68*Ts2 + 1398.55*Ts3 - 
+                                          339.574*Ts4 + 155.38*Ts5 - 94.1732*Ts6 + 68.0747*Ts7 - 
+                                          56.3546*Ts8 + 52.8474*Ts9 - 57.2106*Ts10 + 79.6158*Ts11)
+            
+            dTs3_dt = (1/denom) * dif1 * (0.0 - 216.102*Csat + 623.883*Ts2 - 666.927*Ts3 + 
+                                          314.69*Ts4 - 79.6341*Ts5 + 38.4789*Ts6 - 24.8625*Ts7 + 
+                                          19.3336*Ts8 - 17.4769*Ts9 + 18.5229*Ts10 - 25.5064*Ts11)
+            
+            dTs4_dt = (1/denom) * dif1 * (0.0 + 51.3576*Csat - 103.349*Ts2 + 214.683*Ts3 - 
+                                          290.794*Ts4 + 156.338*Ts5 - 40.8813*Ts6 + 20.5419*Ts7 - 
+                                          14.0087*Ts8 + 11.7504*Ts9 - 11.934*Ts10 + 16.0906*Ts11)
+            
+            dTs5_dt = (1/denom) * dif1 * (0.0 - 21.3451*Csat + 38.4943*Ts2 - 44.2193*Ts3 + 
+                                          127.211*Ts4 - 188.669*Ts5 + 108.676*Ts6 - 29.5263*Ts7 + 
+                                          15.5706*Ts8 - 11.4047*Ts9 + 10.7477*Ts10 - 13.9713*Ts11)
+            
+            dTs6_dt = (1/denom) * dif1 * (0.0 + 12.362*Csat - 21.2652*Ts2 + 19.4771*Ts3 - 
+                                          30.3147*Ts4 + 99.0212*Ts5 - 155.568*Ts6 + 94.3278*Ts7 - 
+                                          26.904*Ts8 + 15.2359*Ts9 - 12.5905*Ts10 + 15.3766*Ts11)
+            
+            dTs7_dt = (1/denom) * dif1 * (0.0 - 9.15831*Csat + 15.3765*Ts2 - 12.5905*Ts3 + 
+                                          15.2361*Ts4 - 26.9043*Ts5 + 94.3281*Ts6 - 155.568*Ts7 + 
+                                          99.0218*Ts8 - 30.3155*Ts9 + 19.4782*Ts10 - 21.267*Ts11)
+            
+            dTs8_dt = (1/denom) * dif1 * (0.0 + 8.43803*Csat - 13.9738*Ts2 + 10.7495*Ts3 - 
+                                          11.4063*Ts4 + 15.5722*Ts5 - 29.5281*Ts6 + 108.678*Ts7 - 
+                                          188.671*Ts8 + 127.214*Ts9 - 44.2228*Ts10 + 38.4997*Ts11)
+            
+            dTs9_dt = (1/denom) * dif1 * (0.0 - 9.80631*Csat + 16.1085*Ts2 - 11.9465*Ts3 + 
+                                          11.7612*Ts4 - 14.0191*Ts5 + 20.5525*Ts6 - 40.8927*Ts7 + 
+                                          156.351*Ts8 - 290.809*Ts9 + 214.702*Ts10 - 103.378*Ts11)
+            
+            dTs10_dt = (1/denom) * dif1 * (0.0 + 15.6376*Csat - 25.5668*Ts2 + 18.5648*Ts3 - 
+                                           17.5131*Ts4 + 19.3681*Ts5 - 24.8978*Ts6 + 38.5167*Ts7 - 
+                                           79.6766*Ts8 + 314.74*Ts9 - 666.991*Ts10 + 623.98*Ts11)
+            
+            dTs11_dt = (1/denom) * dif1 * (0.0 - 48.899*Csat + 79.7604*Ts2 - 57.3114*Ts3 + 
+                                           52.935*Ts4 - 56.4392*Ts5 + 68.1623*Ts6 - 94.2691*Ts7 + 
+                                           155.491*Ts8 - 339.708*Ts9 + 1398.72*Ts10 - 4857.95*Ts11)
+            
+            dQt_dt = -(1/(h1 - fdep*hsc)) * dif1 * (0.0 - 0.999885*Csat + 1.63008*Ts2 - 
+                                                    1.16854*Ts3 + 1.07425*Ts4 - 1.1361*Ts5 + 
+                                                    1.35336*Ts6 - 1.82683*Ts7 + 2.87424*Ts8 - 
+                                                    5.62786*Ts9 + 16.1529*Ts10 - 123.326*Ts11)
+            
+            dQst_dt = -kevaprho + (1/(h1 - fdep*hsc)) * dif1 * (0.0 - 110.997*Csat + 
+                                                                 123.321*Ts2 - 16.1502*Ts3 + 
+                                                                 5.62579*Ts4 - 2.87258*Ts5 + 
+                                                                 1.82542*Ts6 - 1.3521*Ts7 + 
+                                                                 1.13491*Ts8 - 1.07303*Ts9 + 
+                                                                 1.16715*Ts10 - 1.6281*Ts11)
+            
+            return [dTs2_dt, dTs3_dt, dTs4_dt, dTs5_dt, dTs6_dt, dTs7_dt, dTs8_dt, 
+                    dTs9_dt, dTs10_dt, dTs11_dt, dQt_dt, dQst_dt]
 
+        # PHASE 2 DIFFERENTIAL EQUATIONS (NO PERFECT SINK) - EXACTLY matching reference
+        def differential_system_phase2(t, y):
+            Vr2, Vr3, Vr4, Vr5, Vr6, Vr7, Vr8, Vr9, Vr10, Vr11, Q1t, Qet = y
+            
+            common_denom = -(110.997/hsc) - (1.0 * chi)/hsc
+            flux_term = (0.0 - (123.321 * Vr2)/hsc + (16.1502 * Vr3)/hsc - 
+                         (5.62579 * Vr4)/hsc + (2.87258 * Vr5)/hsc - 
+                         (1.82542 * Vr6)/hsc + (1.3521 * Vr7)/hsc - 
+                         (1.13491 * Vr8)/hsc + (1.07303 * Vr9)/hsc - 
+                         (1.16715 * Vr10)/hsc + (1.6281 * Vr11)/hsc)
+            
+            dVr2_dt = ((1/hsc**2) * dif1 * (0.0 - 4857.68*Vr2 + 1398.55*Vr3 - 339.574*Vr4 + 
+                                            155.38*Vr5 - 94.1732*Vr6 + 68.0747*Vr7 - 56.3546*Vr8 + 
+                                            52.8474*Vr9 - 57.2106*Vr10 + 79.6158*Vr11 + 
+                                            (1/common_denom) * 3699.34 * flux_term))
+            
+            dVr3_dt = ((1/hsc**2) * dif1 * (0.0 + 623.883*Vr2 - 666.927*Vr3 + 314.69*Vr4 - 
+                                            79.6341*Vr5 + 38.4789*Vr6 - 24.8625*Vr7 + 19.3336*Vr8 - 
+                                            17.4769*Vr9 + 18.5229*Vr10 - 25.5064*Vr11 - 
+                                            (1/common_denom) * 216.102 * flux_term))
+            
+            dVr4_dt = ((1/hsc**2) * dif1 * (0.0 - 103.349*Vr2 + 214.683*Vr3 - 290.794*Vr4 + 
+                                            156.338*Vr5 - 40.8813*Vr6 + 20.5419*Vr7 - 14.0087*Vr8 + 
+                                            11.7504*Vr9 - 11.934*Vr10 + 16.0906*Vr11 + 
+                                            (1/common_denom) * 51.3576 * flux_term))
+            
+            dVr5_dt = ((1/hsc**2) * dif1 * (0.0 + 38.4943*Vr2 - 44.2193*Vr3 + 127.211*Vr4 - 
+                                            188.669*Vr5 + 108.676*Vr6 - 29.5263*Vr7 + 15.5706*Vr8 - 
+                                            11.4047*Vr9 + 10.7477*Vr10 - 13.9713*Vr11 - 
+                                            (1/common_denom) * 21.3451 * flux_term))
+            
+            dVr6_dt = ((1/hsc**2) * dif1 * (0.0 - 21.2652*Vr2 + 19.4771*Vr3 - 30.3147*Vr4 + 
+                                            99.0212*Vr5 - 155.568*Vr6 + 94.3278*Vr7 - 26.904*Vr8 + 
+                                            15.2359*Vr9 - 12.5905*Vr10 + 15.3766*Vr11 + 
+                                            (1/common_denom) * 12.362 * flux_term))
+            
+            dVr7_dt = ((1/hsc**2) * dif1 * (0.0 + 15.3765*Vr2 - 12.5905*Vr3 + 15.2361*Vr4 - 
+                                            26.9043*Vr5 + 94.3281*Vr6 - 155.568*Vr7 + 99.0218*Vr8 - 
+                                            30.3155*Vr9 + 19.4782*Vr10 - 21.267*Vr11 - 
+                                            (1/common_denom) * 9.15831 * flux_term))
+            
+            dVr8_dt = ((1/hsc**2) * dif1 * (0.0 - 13.9738*Vr2 + 10.7495*Vr3 - 11.4063*Vr4 + 
+                                            15.5722*Vr5 - 29.5281*Vr6 + 108.678*Vr7 - 188.671*Vr8 + 
+                                            127.214*Vr9 - 44.2228*Vr10 + 38.4997*Vr11 + 
+                                            (1/common_denom) * 8.43803 * flux_term))
+            
+            dVr9_dt = ((1/hsc**2) * dif1 * (0.0 + 16.1085*Vr2 - 11.9465*Vr3 + 11.7612*Vr4 - 
+                                            14.0191*Vr5 + 20.5525*Vr6 - 40.8927*Vr7 + 156.351*Vr8 - 
+                                            290.809*Vr9 + 214.702*Vr10 - 103.378*Vr11 - 
+                                            (1/common_denom) * 9.80631 * flux_term))
+            
+            dVr10_dt = ((1/hsc**2) * dif1 * (0.0 - 25.5668*Vr2 + 18.5648*Vr3 - 17.5131*Vr4 + 
+                                             19.3681*Vr5 - 24.8978*Vr6 + 38.5167*Vr7 - 79.6766*Vr8 + 
+                                             314.74*Vr9 - 666.991*Vr10 + 623.98*Vr11 + 
+                                             (1/common_denom) * 15.6376 * flux_term))
+            
+            dVr11_dt = ((1/hsc**2) * dif1 * (0.0 + 79.7604*Vr2 - 57.3114*Vr3 + 52.935*Vr4 - 
+                                             56.4392*Vr5 + 68.1623*Vr6 - 94.2691*Vr7 + 155.491*Vr8 - 
+                                             339.708*Vr9 + 1398.72*Vr10 - 4857.95*Vr11 - 
+                                             (1/common_denom) * 48.899 * flux_term))
+            
+            dQ1t_dt = (-(1/hsc) * dif1 * (0.0 + 1.63008*Vr2 - 1.16854*Vr3 + 
+                                          1.07425*Vr4 - 1.1361*Vr5 + 1.35336*Vr6 - 
+                                          1.82683*Vr7 + 2.87424*Vr8 - 5.62786*Vr9 + 
+                                          16.1529*Vr10 - 123.326*Vr11 - 
+                                          (1/common_denom) * 0.999885 * flux_term))
+            
+            dQet_dt = (1/hsc * dif1 * (0.0 + 123.321*Vr2 - 16.1502*Vr3 + 
+                                       5.62579*Vr4 - 2.87258*Vr5 + 1.82542*Vr6 - 
+                                       1.3521*Vr7 + 1.13491*Vr8 - 1.07303*Vr9 + 
+                                       1.16715*Vr10 - 1.6281*Vr11 - 
+                                       (1/common_denom) * 110.997 * flux_term))
+            
+            return [dVr2_dt, dVr3_dt, dVr4_dt, dVr5_dt, dVr6_dt, dVr7_dt, dVr8_dt, 
+                    dVr9_dt, dVr10_dt, dVr11_dt, dQ1t_dt, dQet_dt]
+
+        # RUN ABOVE SATURATION SIMULATION
         def qst_negative(t, y):
             return y[11]
         qst_negative.terminal = True
@@ -460,89 +702,107 @@ def solve_dermal_absorption_original(MW, logKow, Pvap, Sw, Mo=1e-3, tf_hours=25.
 
         y0 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Msurfo]
         t_span = (0, tf)
-        t_eval = np.linspace(0, tf, 5000)
-        sol = solve_ivp(differential_system, t_span, y0, t_eval=t_eval, events=qst_negative, method='RK45', rtol=1e-7, atol=1e-9)
+        t_eval = np.linspace(0, tf, 10000)
+
+        sol = solve_ivp(differential_system, t_span, y0, t_eval=t_eval, 
+                        events=qst_negative, method='RK45', rtol=1e-8, atol=1e-10)
 
         t = sol.t
-        Qt = sol.y[10]
-        Qst = sol.y[11]
+        Ts2, Ts3, Ts4, Ts5, Ts6, Ts7, Ts8, Ts9, Ts10, Ts11, Qt, Qst = sol.y
         Qet = kevaprho * t
 
-        # Phase 2 if needed
+        # Check for phase transition
         if sol.t_events[0].size > 0:
             ttrans = sol.t_events[0][0]
-            ROOT = np.array([1e-20, 0.0130467, 0.0674683, 0.160295, 0.283302,
-                             0.425563, 0.574437, 0.716698, 0.839705, 0.932532,
+            
+            # Setup for Phase 2
+            ROOT = np.array([1e-20, 0.0130467, 0.0674683, 0.160295, 0.283302, 
+                             0.425563, 0.574437, 0.716698, 0.839705, 0.932532, 
                              0.986953, 1.0])
-            # Interpolation for transition values
+            
+            N2 = 12
+            Tstrans = np.zeros(N2)
+            Tstrans[0] = Csat
+            Tstrans[1:11] = [np.interp(ttrans, t, Ts2), np.interp(ttrans, t, Ts3), 
+                             np.interp(ttrans, t, Ts4), np.interp(ttrans, t, Ts5),
+                             np.interp(ttrans, t, Ts6), np.interp(ttrans, t, Ts7),
+                             np.interp(ttrans, t, Ts8), np.interp(ttrans, t, Ts9),
+                             np.interp(ttrans, t, Ts10), np.interp(ttrans, t, Ts11)]
+            Tstrans[11] = 0
+            
+            # Create interpolation
             zTop = ROOT * fdep * hsc
             zSkin = ROOT * (1 - fdep) * hsc + fdep * hsc
             zAll = np.concatenate([zTop[1:-1], zSkin[1:-1]])
             vTop = np.full(len(zTop[1:-1]), Csat)
-            # Prepare vector from Ts2..Ts11 at ttrans
-            Ts_list = [np.interp(ttrans, t, sol.y[i]) for i in range(0, 10)]
-            vSkin = np.array(Ts_list[1:-1])  # Ts3..Ts10 (match lengths)
-            if vSkin.size != zSkin[1:-1].size:
-                vSkin = np.interp(np.linspace(0, 1, zSkin[1:-1].size), np.linspace(0, 1, vSkin.size), vSkin)
-            zAll = np.concatenate([zTop[1:-1], zSkin[1:-1]])
+            vSkin = Tstrans[2:N2-1]
             vAll = np.concatenate([vTop, vSkin])
-            uniq_idx = np.unique(zAll, return_index=True)[1]
-            interpCombined = interp1d(zAll[uniq_idx], vAll[uniq_idx], kind='linear', bounds_error=False, fill_value='extrapolate')
-
-            Vr_init = []
-            ROOT_positions = ROOT[1:-1]
-            for pos in ROOT_positions:
-                Vr_init.append(interpCombined(pos * hsc))
-            Vr_init = np.array(Vr_init[:10])
-            qtinitp2 = float(np.interp(ttrans, t, Qt))
-            qevapinitp2 = float(kevaprho * ttrans)
-            y0_p2 = np.concatenate([Vr_init, [qtinitp2, qevapinitp2]])
-
-            def differential_system_phase2(t, y):
-                Vr2, Vr3, Vr4, Vr5, Vr6, Vr7, Vr8, Vr9, Vr10, Vr11, Q1t, Qet = y
-                common_denom = -(110.997 / hsc) - (1.0 * chi) / hsc
-                flux_term = (0.0 - (123.321 * Vr2) / hsc + (16.1502 * Vr3) / hsc -
-                             (5.62579 * Vr4) / hsc + (2.87258 * Vr5) / hsc -
-                             (1.82542 * Vr6) / hsc + (1.3521 * Vr7) / hsc -
-                             (1.13491 * Vr8) / hsc + (1.07303 * Vr9) / hsc -
-                             (1.16715 * Vr10) / hsc + (1.6281 * Vr11) / hsc)
-
-                dVr2_dt = (1 / hsc ** 2) * D1 * (0.0 - 4857.68 * Vr2 + 1398.55 * Vr3 - 339.574 * Vr4 + 155.38 * Vr5 - 94.1732 * Vr6 + 68.0747 * Vr7 - 56.3546 * Vr8 + 52.8474 * Vr9 - 57.2106 * Vr10 + 79.6158 * Vr11 + (1 / common_denom) * 3699.34 * flux_term)
-                dVr3_dt = (1 / hsc ** 2) * D1 * (0.0 + 623.883 * Vr2 - 666.927 * Vr3 + 314.69 * Vr4 - 79.6341 * Vr5 + 38.4789 * Vr6 - 24.8625 * Vr7 + 19.3336 * Vr8 - 17.4769 * Vr9 + 18.5229 * Vr10 - 25.5064 * Vr11 - (1 / common_denom) * 216.102 * flux_term)
-                dVr4_dt = (1 / hsc ** 2) * D1 * (0.0 - 103.349 * Vr2 + 214.683 * Vr3 - 290.794 * Vr4 + 156.338 * Vr5 - 40.8813 * Vr6 + 20.5419 * Vr7 - 14.0087 * Vr8 + 11.7504 * Vr9 - 11.934 * Vr10 + 16.0906 * Vr11 + (1 / common_denom) * 51.3576 * flux_term)
-                dVr5_dt = (1 / hsc ** 2) * D1 * (0.0 + 38.4943 * Vr2 - 44.2193 * Vr3 + 127.211 * Vr4 - 188.669 * Vr5 + 108.676 * Vr6 - 29.5263 * Vr7 + 15.5706 * Vr8 - 11.4047 * Vr9 + 10.7477 * Vr10 - 13.9713 * Vr11 - (1 / common_denom) * 21.3451 * flux_term)
-                dVr6_dt = (1 / hsc ** 2) * D1 * (0.0 - 21.2652 * Vr2 + 19.4771 * Vr3 - 30.3147 * Vr4 + 99.0212 * Vr5 - 155.568 * Vr6 + 94.3278 * Vr7 - 26.904 * Vr8 + 15.2359 * Vr9 - 12.5905 * Vr10 + 15.3766 * Vr11 + (1 / common_denom) * 12.362 * flux_term)
-                dVr7_dt = (1 / hsc ** 2) * D1 * (0.0 + 15.3765 * Vr2 - 12.5905 * Vr3 + 15.2361 * Vr4 - 26.9043 * Vr5 + 94.3281 * Vr6 - 155.568 * Vr7 + 99.0218 * Vr8 - 30.3155 * Vr9 + 19.4782 * Vr10 - 21.267 * Vr11 - (1 / common_denom) * 9.15831 * flux_term)
-                dVr8_dt = (1 / hsc ** 2) * D1 * (0.0 - 13.9738 * Vr2 + 10.7495 * Vr3 - 11.4063 * Vr4 + 15.5722 * Vr5 - 29.5281 * Vr6 + 108.678 * Vr7 - 188.671 * Vr8 + 127.214 * Vr9 - 44.2228 * Vr10 + 38.4997 * Vr11 + (1 / common_denom) * 8.43803 * flux_term)
-                dVr9_dt = (1 / hsc ** 2) * D1 * (0.0 + 16.1085 * Vr2 - 11.9465 * Vr3 + 11.7612 * Vr4 - 14.0191 * Vr5 + 20.5525 * Vr6 - 40.8927 * Vr7 + 156.351 * Vr8 - 290.809 * Vr9 + 214.702 * Vr10 - 103.378 * Vr11 - (1 / common_denom) * 9.80631 * flux_term)
-                dVr10_dt = (1 / hsc ** 2) * D1 * (0.0 - 25.5668 * Vr2 + 18.5648 * Vr3 - 17.5131 * Vr4 + 19.3681 * Vr5 - 24.8978 * Vr6 + 38.5167 * Vr7 - 79.6766 * Vr8 + 314.74 * Vr9 - 666.991 * Vr10 + 623.98 * Vr11 + (1 / common_denom) * 15.6376 * flux_term)
-                dVr11_dt = (1 / hsc ** 2) * D1 * (0.0 + 79.7604 * Vr2 - 57.3114 * Vr3 + 52.935 * Vr4 - 56.4392 * Vr5 + 68.1623 * Vr6 - 94.2691 * Vr7 + 155.491 * Vr8 - 339.708 * Vr9 + 1398.72 * Vr10 - 4857.95 * Vr11 - (1 / common_denom) * 48.899 * flux_term)
-
-                dQ1t_dt = (-(1 / hsc) * D1 * (0.0 + 1.63008 * Vr2 - 1.16854 * Vr3 + 1.07425 * Vr4 - 1.1361 * Vr5 + 1.35336 * Vr6 - 1.82683 * Vr7 + 2.87424 * Vr8 - 5.62786 * Vr9 + 16.1529 * Vr10 - 123.326 * Vr11 - (1 / common_denom) * 0.999885 * flux_term))
-                dQet_dt = (1 / hsc) * D1 * (0.0 + 123.321 * Vr2 - 16.1502 * Vr3 + 5.62579 * Vr4 - 2.87258 * Vr5 + 1.82542 * Vr6 - 1.3521 * Vr7 + 1.13491 * Vr8 - 1.07303 * Vr9 + 1.16715 * Vr10 - 1.6281 * Vr11 - (1 / common_denom) * 110.997 * flux_term)
-                return np.array([dVr2_dt, dVr3_dt, dVr4_dt, dVr5_dt, dVr6_dt, dVr7_dt, dVr8_dt, dVr9_dt, dVr10_dt, dVr11_dt, dQ1t_dt, dQet_dt])
-
-            phase2_duration = tf - ttrans
-            if phase2_duration > 1.0:
-                t_span_phase2 = (0, phase2_duration)
-                t_eval_phase2 = np.linspace(0, phase2_duration, 4000)
-                sol2 = solve_ivp(differential_system_phase2, t_span_phase2, y0_p2, t_eval=t_eval_phase2, method='RK45', rtol=1e-7, atol=1e-9)
-                if sol2.success and sol2.y.size > 0:
-                    t_combined = np.concatenate([t, sol2.t + ttrans])
-                    Qt_combined = np.concatenate([Qt, sol2.y[-2]])
-                    Qet_combined = np.concatenate([Qet, sol2.y[-1]])
+            
+            if len(zAll) != len(vAll):
+                n_internal = len(ROOT) - 2
+                zTop_internal = zTop[1:-1]
+                zSkin_internal = zSkin[1:-1]
+                vTop = np.full(len(zTop_internal), Csat)
+                available_temps = len(Tstrans) - 2
+                if available_temps >= len(zSkin_internal):
+                    vSkin = Tstrans[1:1+len(zSkin_internal)]
                 else:
-                    t_combined, Qt_combined, Qet_combined = t, Qt, Qet
+                    vSkin = np.zeros(len(zSkin_internal))
+                    vSkin[:available_temps] = Tstrans[1:1+available_temps]
+                zAll = np.concatenate([zTop_internal, zSkin_internal])
+                vAll = np.concatenate([vTop, vSkin])
+            
+            unique_indices = np.unique(zAll, return_index=True)[1]
+            zAll_unique = zAll[unique_indices]
+            vAll_unique = vAll[unique_indices]
+            interpCombined = interp1d(zAll_unique, vAll_unique, kind='linear', bounds_error=False, fill_value='extrapolate')
+            
+            # Phase 2 initial conditions
+            Vr_init = np.zeros(10)
+            ROOT_positions = ROOT[1:-1]
+            for i in range(10):
+                pos = ROOT_positions[i] * hsc
+                Vr_init[i] = interpCombined(pos)
+            
+            qtinitp2 = np.interp(ttrans, t, Qt)
+            qevapinitp2 = kevaprho * ttrans
+            y0_phase2 = np.concatenate([Vr_init, [qtinitp2, qevapinitp2]])
+            
+            # Solve Phase 2
+            phase2_duration = tf - ttrans
+            if phase2_duration >= 1.0:
+                t_span_phase2 = (0, phase2_duration)
+                t_eval_phase2 = np.linspace(0, phase2_duration, 5000)
+                sol2 = solve_ivp(differential_system_phase2, t_span_phase2, y0_phase2, 
+                                 t_eval=t_eval_phase2, method='RK45', rtol=1e-8, atol=1e-10)
+                
+                if sol2.success and sol2.y.size > 0:
+                    t2 = sol2.t
+                    Vr2, Vr3, Vr4, Vr5, Vr6, Vr7, Vr8, Vr9, Vr10, Vr11, Q1t_phase2, Qet_phase2 = sol2.y
+                    
+                    # Combine results
+                    t_combined = np.concatenate([t, t2 + ttrans])
+                    Qt_combined = np.concatenate([Qt, Q1t_phase2])
+                    Qet_combined = np.concatenate([Qet, Qet_phase2])
+                else:
+                    t_combined = t
+                    Qt_combined = Qt
+                    Qet_combined = Qet
             else:
-                t_combined, Qt_combined, Qet_combined = t, Qt, Qet
+                t_combined = t
+                Qt_combined = Qt
+                Qet_combined = Qet
         else:
-            t_combined, Qt_combined, Qet_combined = t, Qt, Qet
+            t_combined = t
+            Qt_combined = Qt
+            Qet_combined = Qet
 
         return t_combined / 3600.0, Qt_combined, Qet_combined
 
     else:
-        # Below saturation model ODE
-        h = h1
+        # BELOW SATURATION MODEL (SINGLE-PHASE) - EXACTLY matching reference
+        # Adjust parameters for below saturation model
+        h = h1  # Use the same thickness (h1 = 0.00134 cm)
         Tso = Mo / (fdep * h)
 
         def ode_system(t, y):
@@ -581,37 +841,57 @@ def solve_dermal_absorption_original(MW, logKow, Pvap, Sw, Mo=1e-3, tf_hours=25.
             dydt[21] = ((1 / (fdep * h)) * D1 * (123.321 * Ts[0] - 16.1502 * Ts[1] + 5.62579 * Ts[2] - 2.87258 * Ts[3] + 1.82542 * Ts[4] - 1.3521 * Ts[5] + 1.13491 * Ts[6] - 1.07303 * Ts[7] + 1.16715 * Ts[8] - 1.6281 * Ts[9] + (0.99866 * complex_flux) / denom1 - (110.997 / chi_term_denom) * surface_term))
             return dydt
 
+        # Initial conditions (exact from reference code)
         y0 = np.zeros(22)
+        # Ts_2 through Ts_11 = Tso
         y0[0:10] = Tso
+        # Tv_2 through Tv_11 = 0
         y0[10:20] = 0.0
-        y0[20] = 0.0
-        y0[21] = 0.0
+        # Qt[0] = 0, Qet[0] = 0
+        y0[20] = 0.0  # Qt
+        y0[21] = 0.0  # Qet
+        
+        # Debug: Log initial conditions
+        # Initial conditions calculated
+
+        # Time span
         t_span = (0, tf)
-        t_eval = np.linspace(0, tf, 2000)
-        sol = solve_ivp(ode_system, t_span, y0, t_eval=t_eval, method='LSODA', rtol=1e-7, atol=1e-9)
-        if not sol.success:
-            # Fallback: simple exponentials
-            t = t_eval
+        t_eval = np.linspace(0, tf, 1000)
+
+        # Solve the ODE system (LSODA method as in reference)
+        sol = solve_ivp(ode_system, t_span, y0, t_eval=t_eval, method='LSODA', rtol=1e-8, atol=1e-10)
+        
+        # Debug: Log solver status
+        # Solver completed
+        app.logger.info(f"Solver success: {sol.success}, message: {sol.message}")
+        
+        if sol.success:
+            # Extract solutions
+            Qt_combined = sol.y[20]  # Qt is at index 20
+            Qet_combined = sol.y[21]  # Qet is at index 21
+            t_combined = sol.t
+            app.logger.info(f"Solution range: Qt={Qt_combined.min():.3e} to {Qt_combined.max():.3e}, Qet={Qet_combined.min():.3e} to {Qet_combined.max():.3e}")
+        else:
+            # Fallback: simple exponentials if solver fails
+            app.logger.warning(f"ODE solver failed, using fallback exponentials")
+            t_combined = t_eval
             tau_abs = max(0.05 * tf, 1.0)
             tau_evap = max(0.02 * tf, 1.0)
-            Qt = Mo * 0.3 * (1 - np.exp(-t / tau_abs))
-            Qet = Mo * 0.6 * (1 - np.exp(-t / tau_evap))
-        else:
-            Qt = sol.y[20]
-            Qet = sol.y[21]
-            t = sol.t
-        return t / 3600.0, Qt, Qet
+            Qt_combined = Mo * 0.3 * (1 - np.exp(-t_combined / tau_abs))
+            Qet_combined = Mo * 0.6 * (1 - np.exp(-t_combined / tau_evap))
+        
+        return t_combined / 3600.0, Qt_combined, Qet_combined
 
 
-def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0, custom_solubility=None):
+def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0, custom_properties=None):
     """Plot all selected agents with clean styling:
     - Each agent gets one color; styles indicate quantity: Qabs (-), Qevap (--), Qtotal (:)
     - Legend shows agent names once plus a compact style key for the three quantities
     - Right axis shows percentage of initial dose linked to the left axis scale
-    - custom_solubility: dict mapping agent names to solubility values (mg/cm³)
+    - custom_properties: dict mapping agent names to property dicts {agent: {prop: value}}
     """
-    if custom_solubility is None:
-        custom_solubility = {}
+    if custom_properties is None:
+        custom_properties = {}
     
     fig, ax = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     cmap = plt.get_cmap('tab10')
@@ -630,29 +910,53 @@ def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0, cus
 
             props = get_agent_data(name)
             
-            # Use custom solubility if provided, otherwise get from data
-            if name in custom_solubility:
-                Sw = float(custom_solubility[name])
+            # Use custom properties if provided, otherwise get from data
+            if name in custom_properties and 'Sw' in custom_properties[name]:
+                Sw = float(custom_properties[name]['Sw']) / 1000.0  # Convert mg/L to mg/cm³
             else:
-                Sw = float(props.get('Sw', 1.0) or 1.0)
+                Sw = props.get('Sw')
+                if Sw is None:
+                    raise ValueError(f"Solubility not found for {name}. Please provide it manually.")
+                Sw = float(Sw)
             
-            # Try CSV first, then PubChem, then default
-            Pvap = props.get('Pvap')
-            if Pvap is None:
-                Pvap = 21.0
-                pc = pubchem_lookup(name)
-                if pc:
-                    try:
-                        vap_prop = safe_pubchem_prop(pc, 'Vapor Pressure')
-                        if vap_prop:
-                            Pvap = float(vap_prop)
-                    except Exception:
-                        pass
+            if name in custom_properties and 'Pvap' in custom_properties[name]:
+                Pvap = float(custom_properties[name]['Pvap'])
             else:
-                Pvap = float(Pvap)
+                Pvap = props.get('Pvap')
+                if Pvap is None:
+                    pc = pubchem_lookup(name)
+                    if pc:
+                        try:
+                            vap_prop = safe_pubchem_prop(pc, 'Vapor Pressure')
+                            if vap_prop:
+                                Pvap = float(vap_prop)
+                        except Exception:
+                            pass
+                if Pvap is None:
+                    raise ValueError(f"Vapor pressure not found for {name}. Please provide it manually.")
+                else:
+                    Pvap = float(Pvap)
+            
+            # Get formula and SMILES for atom count calculation
+            formula = props.get('formula')
+            smiles_str = props.get('SMILES')
+            
+            # Get atom counts (already parsed in get_agent_data)
+            nc = props.get('nc', 0)
+            nh = props.get('nh', 0)
+            no = props.get('no', 0)
+            nn = props.get('nn', 0)
+            nring = props.get('nring', 0)
 
-            t_hr, Qt, Qet = solve_dermal_absorption_original(MW, logP, Pvap, Sw, Mo=Mo, tf_hours=tf_hours)
+            t_hr, Qt, Qet = solve_dermal_absorption_original(
+                MW, logP, Pvap, Sw, Mo=Mo, tf_hours=tf_hours, 
+                nc=nc, nh=nh, no=no, nn=nn, nring=nring,
+                formula=formula, smiles=smiles_str
+            )
             Qtot = Qt + Qet
+            
+            # Log what we're about to plot
+            app.logger.info(f"Plotting {name}: Qt range {Qt.min():.3e} to {Qt.max():.3e}, Qet range {Qet.min():.3e} to {Qet.max():.3e}")
 
             color = cmap(i % cmap.N)
             ax.plot(t_hr, Qt, color=color, linestyle='-', linewidth=2.0, label=f"{name} — Qabs")
@@ -740,189 +1044,6 @@ def fig_to_base64(fig):
 
 
 # -------------------------
-# Fallback simulate_dermal_absorption_agent
-# -------------------------
-def simulate_dermal_absorption_agent_fallback(MW, logP, Pvap, Sw, Mo=1e-3, tf_hours=0.5):
-    t_hr = np.linspace(0.0, float(tf_hours), max(50, int(40 * tf_hours + 1)))
-    abs_scale = max(1e-6, 0.02 * (10.0 ** (0.5 * logP)) / (1.0 + MW / 300.0))
-    evap_scale = max(1e-6, 0.01 * (10.0 ** (-0.2 * logP)) * (Pvap / 20.0 if Pvap > 0 else 1.0))
-    asymp_abs_frac = np.clip(0.15 + 0.1 * np.tanh(logP), 0.01, 0.9)
-    asymp_evap_frac = np.clip(0.5 - 0.2 * np.tanh(logP), 0.01, 0.99)
-    Qt_asymp = Mo * asymp_abs_frac
-    Qet_asymp = Mo * asymp_evap_frac
-    tau_abs = max(0.01, 0.2 / (abs_scale * 1000.0))
-    tau_evap = max(0.005, 0.05 / (evap_scale * 1000.0))
-    Qt = Qt_asymp * (1.0 - np.exp(-t_hr / tau_abs))
-    Qet = Qet_asymp * (1.0 - np.exp(-t_hr / tau_evap))
-    Qt[0] = 0.0
-    Qet[0] = 0.0
-    return t_hr, Qt, Qet
-
-
-# -------------------------
-# Safe wrapper for simulate_dermal_absorption_agent
-# -------------------------
-def safe_simulate_dermal_absorption_agent(MW, logP, Pvap, Sw, Mo=1e-3, tf_hours=0.5):
-    try:
-        fn = globals().get('simulate_dermal_absorption_agent', None)
-        if fn is None:
-            raise NameError("simulate_dermal_absorption_agent not found")
-        t, Qt, Qet = fn(MW, logP, Pvap, Sw, Mo=Mo, tf_hours=tf_hours)
-        t = np.asarray(t, dtype=float)
-        Qt = np.asarray(Qt, dtype=float)
-        Qet = np.asarray(Qet, dtype=float)
-        if np.max(t) > 2.0 and np.max(t) <= 60.0 * 24.0 and np.mean(np.diff(t)) > 0.01:
-            if np.max(t) > 24.0:
-                app.logger.info("simulate_dermal_absorption_agent returned times in minutes; converting to hours.")
-                t = t / 60.0
-        uniq_idx = np.unique(t, return_index=True)[1]
-        t = t[uniq_idx]
-        Qt = Qt[uniq_idx]
-        Qet = Qet[uniq_idx]
-        if t.size > 0 and t[0] > 0.0:
-            t = np.insert(t, 0, 0.0)
-            Qt = np.insert(Qt, 0, 0.0)
-            Qet = np.insert(Qet, 0, 0.0)
-        if Qt.size == 0 or Qet.size == 0:
-            raise ValueError("simulate_dermal_absorption_agent returned empty arrays")
-        return t, Qt, Qet
-    except Exception as e:
-        app.logger.info("Using fallback simulate_dermal_absorption_agent due to: %s", e)
-        return simulate_dermal_absorption_agent_fallback(MW, logP, Pvap, Sw, Mo=Mo, tf_hours=tf_hours)
-
-
-# -------------------------
-# Combined plotting functions
-# -------------------------
-# Removed chebyshev-based plots and penetration plots per request
-
-
-def combined_plot_abs_evap_all_agents(agents, Mo=1e-3):
-    t_common = GLOBAL_T_COMMON  # minutes
-    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
-    cmap = plt.get_cmap('tab10')
-    any_plotted = False
-
-    for i, agent in enumerate(agents):
-        try:
-            name = str(agent[0])
-            MW = float(agent[1])
-            rho = float(agent[2]) if len(agent) > 2 else 1.0
-            logP = float(agent[3]) if len(agent) > 3 else 0.0
-
-            props = get_agent_data(name)
-            Sw = float(props.get('Sw', 1.0) or 1.0)
-            # Try CSV first, then PubChem, then default
-            Pvap = props.get('Pvap')
-            if Pvap is None:
-                Pvap = 21.0
-                pubchem_compound = pubchem_lookup(name)
-                if pubchem_compound:
-                    try:
-                        vap_prop = safe_pubchem_prop(pubchem_compound, 'Vapor Pressure')
-                        if vap_prop:
-                            Pvap = float(vap_prop)
-                    except:
-                        pass
-            else:
-                Pvap = float(Pvap)
-
-            tf_hours = float(GLOBAL_T_COMMON[-1]) / 60.0
-            tmin, Qt, Qet = safe_simulate_dermal_absorption_agent(MW, logP, Pvap, Sw, Mo=Mo, tf_hours=tf_hours)
-
-            tmin = np.asarray(tmin, dtype=float)
-            Qt = np.asarray(Qt, dtype=float)
-            Qet = np.asarray(Qet, dtype=float)
-            if np.max(tmin) <= tf_hours + 1e-12:
-                tmin_minutes = tmin * 60.0
-            else:
-                tmin_minutes = tmin
-
-            uniq_idx = np.unique(tmin_minutes, return_index=True)[1]
-            tmin_u = tmin_minutes[uniq_idx]
-            Qt_u = Qt[uniq_idx]
-            Qet_u = Qet[uniq_idx]
-
-            Qt_interp = np.interp(t_common, tmin_u, Qt_u, left=0.0, right=Qt_u[-1])
-            Qet_interp = np.interp(t_common, tmin_u, Qet_u, left=0.0, right=Qet_u[-1])
-            Qtot_interp = Qt_interp + Qet_interp
-
-            if Qt_interp.size > 0:
-                Qt_interp[0] = 0.0
-            if Qet_interp.size > 0:
-                Qet_interp[0] = 0.0
-            if Qtot_interp.size > 0:
-                Qtot_interp[0] = 0.0
-
-            color = cmap(i % cmap.N)
-
-            ax.plot(t_common, Qt_interp, '-', linewidth=PLOT_LINEWIDTH, label=f"{name} Qabs (mg/cm²)", color=color)
-            ax.plot(t_common, Qet_interp, '--', linewidth=PLOT_LINEWIDTH, label=f"{name} Qevap (mg/cm²)", color=color)
-            ax.plot(t_common, Qtot_interp, ':', linewidth=(PLOT_LINEWIDTH - 0.4), alpha=0.8, label=f"{name} Qtotal (mg/cm²)", color=color)
-
-            any_plotted = True
-
-        except Exception as e:
-            app.logger.exception("Failed to simulate/plot agent %r: %s", agent, e)
-            continue
-
-    if not any_plotted:
-        app.logger.info("No agent data plotted for detailed dermal abs/evap — drawing fallback sample.")
-        for i, agent in enumerate(agent_properties):
-            name = agent[0]
-            MW = float(agent[1])
-            logP = float(agent[3])
-            tf_hours = float(GLOBAL_T_COMMON[-1]) / 60.0
-            t_hr, Qt_hr, Qet_hr = simulate_dermal_absorption_agent_fallback(MW, logP, 21.0, 1.0, Mo=Mo, tf_hours=tf_hours)
-            tmin_minutes = t_hr * 60.0
-            Qt = np.interp(GLOBAL_T_COMMON, tmin_minutes, Qt_hr, left=0.0, right=Qt_hr[-1])
-            Qet = np.interp(GLOBAL_T_COMMON, tmin_minutes, Qet_hr, left=0.0, right=Qet_hr[-1])
-            ax.plot(GLOBAL_T_COMMON, Qt, '-', linewidth=PLOT_LINEWIDTH, label=f"{name} Qabs (mg/cm²)", color=cmap(i % cmap.N))
-            ax.plot(GLOBAL_T_COMMON, Qet, '--', linewidth=PLOT_LINEWIDTH, label=f"{name} Qevap (mg/cm²)", color=cmap(i % cmap.N))
-        ax.set_ylim(0, 1.0)
-
-    ax.set_xlabel("Time (minutes)", fontsize=PLOT_LABEL_FS)
-    ax.set_ylabel("Mass (mg/cm²)", fontsize=PLOT_LABEL_FS)
-    ax.set_title("Absorption vs Evaporation — Detailed Dermal Model (All agents)", fontsize=PLOT_TITLE_FS)
-    apply_uniform_style(ax)
-
-    handles, labels = ax.get_legend_handles_labels()
-    agent_names_seen = set()
-    dedup_handles = []
-    dedup_labels = []
-
-    for h, l in zip(handles, labels):
-        agent_name = l.split(' Q')[0]
-        if agent_name not in agent_names_seen:
-            dedup_handles.append(h)
-            dedup_labels.append(agent_name)
-            agent_names_seen.add(agent_name)
-
-    if len(dedup_handles) > 0:
-        from matplotlib.lines import Line2D
-        custom_lines = [Line2D([0], [0], color='gray', linestyle='-'),
-                        Line2D([0], [0], color='gray', linestyle='--'),
-                        Line2D([0], [0], color='gray', linestyle=':')]
-        custom_labels = ['Qabs', 'Qevap', 'Qtotal']
-
-        final_handles = dedup_handles + custom_lines
-        final_labels = dedup_labels + custom_labels
-
-        ax.legend(final_handles, final_labels, fontsize=PLOT_LEGEND_FS, bbox_to_anchor=(1.02, 1.0), loc='upper left', frameon=True)
-    else:
-        ax.legend(fontsize=PLOT_LEGEND_FS, bbox_to_anchor=(1.02, 1.0), loc='upper left', frameon=True)
-
-    ax.set_xlim(left=0.0)
-    ax.set_ylim(bottom=0.0)
-
-    plt.tight_layout(rect=[0, 0, 0.78, 1.0])
-    return fig_to_base64(fig)
-
-
-# Replaced detailed dermal absorption plotting with original ODE-based solver
-
-
-# -------------------------
 # Flask route (unchanged)
 # -------------------------
 @app.route('/', methods=['GET', 'POST'])
@@ -932,31 +1053,56 @@ def index():
     applied_dose = ""
     agent_info = []
     combined_images = {'abs_vs_evap': None}
-    missing_solubility = []  # Track agents with missing solubility
-    custom_solubility = {}  # Store custom solubility values
+    missing_properties = {}  # Track agents with missing properties {agent_name: [list of missing props]}
+    custom_properties = {}  # Store custom property values {agent_name: {prop: value}}
 
     if request.method == 'POST':
         selected_agents = request.form.getlist('agents')
         other_agents = request.form.get('other_agents', '')
         applied_dose = request.form.get('applied_dose', '0')
         
-        # Collect custom solubility values from form
+        # Collect custom property values from form
         for key in request.form:
-            if key.startswith('solubility_'):
-                agent_name = key.replace('solubility_', '', 1)
-                try:
-                    custom_solubility[agent_name] = float(request.form[key])
-                except ValueError:
-                    pass
+            if key.startswith('prop_'):
+                # Format: prop_AgentName_PropertyName
+                parts = key.replace('prop_', '', 1).rsplit('_', 1)
+                if len(parts) == 2:
+                    agent_name, prop_name = parts
+                    try:
+                        if agent_name not in custom_properties:
+                            custom_properties[agent_name] = {}
+                        custom_properties[agent_name][prop_name] = float(request.form[key])
+                    except ValueError:
+                        pass
 
         try:
             dose = float(applied_dose)
+            # Validate dose is positive
             if dose <= 0:
-                dose = 1e-3
-                applied_dose = str(dose)
+                raise ValueError("Applied dose must be greater than 0")
+        except ValueError as ve:
+            agent_info.append(f"Error: {str(ve)}")
+            dose = None
         except:
-            dose = 1e-3
-            applied_dose = str(dose)
+            agent_info.append("Error: Invalid applied dose value. Please enter a valid number.")
+            dose = None
+        
+        if dose is None:
+            # Build agent list for dropdown
+            if df_agents is not None:
+                name_col = df_agents_canonmap.get('name', df_agents.columns[0])
+                agent_list = df_agents[name_col].astype(str).tolist()
+            else:
+                agent_list = [a[0] for a in agent_properties]
+            
+            return render_template('index.html',
+                                agent_list=agent_list,
+                                selected_agents=selected_agents,
+                                other_agents=other_agents,
+                                applied_dose=applied_dose,
+                                agent_info=agent_info,
+                                combined_images=combined_images,
+                                missing_properties={})
 
         if other_agents.strip():
             others = [a.strip() for a in other_agents.split(',') if a.strip()]
@@ -977,35 +1123,74 @@ def index():
                     agents_to_run.append(matched)
                 else:
                     props = get_agent_data(name)
-                    if props.get('MW') is not None and props.get('logP') is not None:
-                        mw = props['MW']
-                        rho = 1.0
-                        logP = props['logP']
-                        kObs = 1.0  # Default kObs for Chebyshev model
-                        agents_to_run.append((name, mw, rho, logP, kObs))
+                    
+                    # Check for custom properties first
+                    mw = None
+                    logP = None
+                    if name in custom_properties:
+                        mw = custom_properties[name].get('MW')
+                        logP = custom_properties[name].get('logP')
+                    
+                    # Fall back to fetched properties
+                    if mw is None:
+                        mw = props.get('MW')
+                    if logP is None:
+                        logP = props.get('logP')
+                    
+                    if mw is not None and logP is not None:
+                        # Simplified agent tuple: (name, MW, placeholder, logP, placeholder)
+                        # Middle values maintained for backward compatibility with existing code
+                        agents_to_run.append((name, mw, 1.0, logP, 1.0))
                     else:
-                        msg = f"Skipping {name}: insufficient properties (need MW and logP)."
-                        app.logger.warning(msg)
-                        agent_info.append(msg)
+                        # Track which properties are missing
+                        if name not in missing_properties:
+                            missing_properties[name] = []
+                        if mw is None:
+                            missing_properties[name].append('MW')
+                        if logP is None:
+                            missing_properties[name].append('logP')
 
         if not agents_to_run:
             agents_to_run = agent_properties
 
-        # First pass: check for missing solubility
+        # First pass: check for missing properties (Sw and Pvap)
         for ag in agents_to_run:
             name = ag[0]
             props = get_agent_data(name)
-            Sw = props.get('Sw')
             
-            # Check if custom solubility provided
-            if name in custom_solubility:
-                Sw = custom_solubility[name]
-            elif Sw is None:
-                # Mark as missing and skip computation for now
-                missing_solubility.append(name)
+            # Check for missing Sw
+            Sw = props.get('Sw')
+            if name in custom_properties and 'Sw' in custom_properties[name]:
+                Sw = float(custom_properties[name]['Sw']) / 1000.0  # Convert mg/L to mg/cm³
+            if Sw is None:
+                if name not in missing_properties:
+                    missing_properties[name] = []
+                if 'Sw' not in missing_properties[name]:
+                    missing_properties[name].append('Sw')
+            
+            # Check for missing Pvap
+            Pvap = props.get('Pvap')
+            if name in custom_properties and 'Pvap' in custom_properties[name]:
+                Pvap = custom_properties[name]['Pvap']
+            if Pvap is None:
+                # Try PubChem one more time
+                pc = pubchem_lookup(name)
+                if pc:
+                    try:
+                        vap_prop = safe_pubchem_prop(pc, 'Vapor Pressure')
+                        if vap_prop:
+                            Pvap = float(vap_prop)
+                    except Exception:
+                        pass
+                
+                if Pvap is None:
+                    if name not in missing_properties:
+                        missing_properties[name] = []
+                    if 'Pvap' not in missing_properties[name]:
+                        missing_properties[name].append('Pvap')
         
-        # If we have missing solubility values, return early with prompt
-        if missing_solubility:
+        # If we have missing property values, return early with prompt
+        if missing_properties:
             # Build agent list for dropdown
             if df_agents is not None:
                 name_col = df_agents_canonmap.get('name', df_agents.columns[0])
@@ -1020,30 +1205,57 @@ def index():
                                 applied_dose=applied_dose,
                                 agent_info=agent_info,
                                 combined_images=combined_images,
-                                missing_solubility=missing_solubility)
+                                missing_properties=missing_properties)
         
-        # Second pass: compute Msat / status for each agent
+        # Second pass: compute Msat / status and detailed parameters for each agent
         for ag in agents_to_run:
             name = ag[0]
             mw = float(ag[1]) if len(ag) > 1 else None
             logP = float(ag[3]) if len(ag) > 3 else None
 
             props = get_agent_data(name)
-            Sw = props.get('Sw')
             
-            # Use custom solubility if provided
-            if name in custom_solubility:
-                Sw = custom_solubility[name]
-            elif Sw is None:
-                Sw = 1.0  # Should not reach here after first pass check
-            else:
+            # Use custom properties if provided, otherwise use fetched data
+            Sw = props.get('Sw')
+            if name in custom_properties and 'Sw' in custom_properties[name]:
+                Sw = float(custom_properties[name]['Sw']) / 1000.0  # Convert mg/L to mg/cm³
+            elif Sw is not None:
                 Sw = float(Sw)
+            
+            # Get Pvap for calculations
+            Pvap = props.get('Pvap')
+            if name in custom_properties and 'Pvap' in custom_properties[name]:
+                Pvap = custom_properties[name]['Pvap']
+            else:
+                if Pvap is None:
+                    pc = pubchem_lookup(name)
+                    if pc:
+                        try:
+                            vap_prop = safe_pubchem_prop(pc, 'Vapor Pressure')
+                            if vap_prop:
+                                Pvap = float(vap_prop)
+                        except Exception:
+                            pass
+            if Pvap is not None:
+                Pvap = float(Pvap)
 
             try:
                 Msat, Kscw, Csat = compute_Msat_from_logP_sw(float(logP), float(Sw))
+                
+                # Calculate additional parameters matching the debug output
+                hsc = 13.4 * 1e-4
+                h1 = hsc
+                fdep = 0.1
+                Kow = 10**logP
+                logPscw = -2.8 + 0.66*logP - 0.0056*mw
+                Pscw = 10**logPscw
+                D1 = (Pscw * h1 / Kscw) / 3600
+                Dsc = D1
+                
             except Exception as e:
                 Msat, Kscw, Csat = (None, None, None)
-                app.logger.debug("Failed to compute Msat for %s: %s", name, e)
+                logPscw, Pscw, D1, Dsc, h1 = (None, None, None, None, None)
+                app.logger.debug("Failed to compute parameters for %s: %s", name, e)
 
             Mo = float(dose)
             if Msat is None:
@@ -1054,31 +1266,47 @@ def index():
                 else:
                     status = "Below saturation (single-phase expected)"
 
+            # Display only requested parameters
+            app.logger.info(f"\n{'='*60}")
+            app.logger.info(f"Agent: {name}")
+            app.logger.info(f"{'='*60}")
+            if logP is not None and mw is not None:
+                app.logger.info(f"logKow={logP:.3f}, MW={mw:.2f}")
+            if logPscw is not None and Pscw is not None:
+                app.logger.info(f"logPscw={logPscw:.3f}, Pscw={Pscw:.3e}")
+            if Kscw is not None and h1 is not None:
+                app.logger.info(f"Kscw={Kscw:.3f}, h1={h1:.3e}")
+            if D1 is not None and Dsc is not None:
+                app.logger.info(f"D1={D1:.3e}, Dsc={Dsc:.3e}")
+            app.logger.info(f"Mo = {Mo:.2e} mg/cm², Msat = {Msat:.6f} mg/cm²" if Msat is not None else f"Mo = {Mo:.2e} mg/cm², Msat = N/A")
+            
             info_lines = [
                 f"Agent: {name}",
-                f"  MW = {mw:.4g}" if mw is not None else "  MW = N/A",
-                f"  logP = {logP:.3g}" if logP is not None else "  logP = N/A",
-                f"  Sw = {Sw:.4g}",
+                f"MW: {mw:.4g} g/mol" if mw is not None else "MW: N/A",
+                f"logP: {logP:.3g}" if logP is not None else "logP: N/A",
+                f"Sw: {Sw*1000:.4g} mg/L" if Sw is not None else "Sw: N/A",  # Convert mg/cm³ back to mg/L for display
             ]
-            if Msat is not None:
-                info_lines.append(f"  Msat = {Msat:.3e} mg/cm²")
-                info_lines.append(f"  Csat (sc) = {Csat:.3e} mg/cm³")
-                info_lines.append(f"  Kscw = {Kscw:.3e}")
+            if Pvap is not None:
+                info_lines.append(f"Pvap: {Pvap:.4g} torr")
             else:
-                info_lines.append("  Msat / Csat / Kscw = N/A")
-
-            info_lines.append(f"  Applied dose (Mo) = {Mo:.3e} mg/cm²")
-            info_lines.append(f"  Status: {status}")
+                info_lines.append("Pvap: N/A")
+            if Msat is not None:
+                info_lines.append(f"Msat: {Msat:.3e} mg/cm²")
+                info_lines.append(f"Csat (sc): {Csat:.3e} mg/cm³")
+            else:
+                info_lines.append("Msat: N/A")
+                info_lines.append("Csat (sc): N/A")
+            info_lines.append(f"Applied dose (Mo): {Mo:.3e} mg/cm²")
+            info_lines.append(f"Status: {status}")
 
             info_text = "\n".join(info_lines)
             agent_info.append(info_text)
-            app.logger.info(info_text)
 
         # Dermal absorption graph only (original ODE-based model)
         try:
             # Use a 25-hour horizon as per original code
             combined_images['abs_vs_evap'] = combined_plot_dermal_absorption_original(
-                agents_to_run, Mo=dose, tf_hours=25.0, custom_solubility=custom_solubility
+                agents_to_run, Mo=dose, tf_hours=25.0, custom_properties=custom_properties
             )
         except Exception as e:
             app.logger.error('Dermal absorption plotting failed: %s', e)
@@ -1098,7 +1326,7 @@ def index():
                             applied_dose=applied_dose,
                             agent_info=agent_info,
                             combined_images=combined_images,
-                            missing_solubility=[])
+                            missing_properties={})
 
 
 if __name__ == "__main__":
