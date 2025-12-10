@@ -18,6 +18,9 @@ import pubchempy as pcp
 from pubchempy import PubChemPyDeprecationWarning
 warnings.filterwarnings("ignore", category=PubChemPyDeprecationWarning)
 
+# Import comparison simulation
+from comparison_model import run_comparison_simulation, run_comparison_simulation_multi
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 app.logger.setLevel(logging.INFO)
@@ -1051,8 +1054,10 @@ def index():
     selected_agents = []
     other_agents = ""
     applied_dose = ""
+    td = "0.0"
+    tsim = "25.0"
     agent_info = []
-    combined_images = {'abs_vs_evap': None}
+    combined_images = {'abs_vs_evap': None, 'comparison_plot': None}
     missing_properties = {}  # Track agents with missing properties {agent_name: [list of missing props]}
     custom_properties = {}  # Store custom property values {agent_name: {prop: value}}
 
@@ -1060,6 +1065,8 @@ def index():
         selected_agents = request.form.getlist('agents')
         other_agents = request.form.get('other_agents', '')
         applied_dose = request.form.get('applied_dose', '0')
+        td = request.form.get('td', '0.0')
+        tsim = request.form.get('tsim', '25.0')
         
         # Collect custom property values from form
         for key in request.form:
@@ -1100,6 +1107,8 @@ def index():
                                 selected_agents=selected_agents,
                                 other_agents=other_agents,
                                 applied_dose=applied_dose,
+                                td=td,
+                                tsim=tsim,
                                 agent_info=agent_info,
                                 combined_images=combined_images,
                                 missing_properties={})
@@ -1203,6 +1212,8 @@ def index():
                                 selected_agents=selected_agents,
                                 other_agents=other_agents,
                                 applied_dose=applied_dose,
+                                td=td,
+                                tsim=tsim,
                                 agent_info=agent_info,
                                 combined_images=combined_images,
                                 missing_properties=missing_properties)
@@ -1302,7 +1313,7 @@ def index():
             info_text = "\n".join(info_lines)
             agent_info.append(info_text)
 
-        # Dermal absorption graph only (original ODE-based model)
+        # Dermal absorption graph only (original ODE-based model) - UNCHANGED
         try:
             # Use a 25-hour horizon as per original code
             combined_images['abs_vs_evap'] = combined_plot_dermal_absorption_original(
@@ -1312,6 +1323,32 @@ def index():
             app.logger.error('Dermal absorption plotting failed: %s', e)
             agent_info.append(f'Dermal absorption plot error: {e}')
 
+        # NEW: Generate comparison plot (with/without decontamination)
+        try:
+            td_hours = float(td)
+            tsim_hours = float(tsim)
+            
+            # Process ALL selected agents for comparison (not just first)
+            if agents_to_run:
+                comparison_result = run_comparison_simulation_multi(
+                    agents_to_run=agents_to_run,
+                    dose=dose,
+                    sim_hours=tsim_hours,
+                    td_hours=td_hours,
+                    custom_properties=custom_properties
+                )
+                
+                if comparison_result and comparison_result.get('comparison_plot'):
+                    combined_images['comparison_plot'] = comparison_result['comparison_plot']
+                    app.logger.info(f"✓ Comparison plot added to combined_images (size: {len(comparison_result['comparison_plot'])} bytes)")
+                else:
+                    app.logger.error(f"✗ Comparison plot is None or empty! Status: {comparison_result.get('status', 'unknown')}")
+                
+                app.logger.info(f"Comparison plot for {len(agents_to_run)} agent(s), Mo={dose}, td={td_hours}h, tsim={tsim_hours}h")
+        except Exception as e:
+            app.logger.error('Comparison plot failed: %s', e)
+            agent_info.append(f'Comparison plot error: {e}')
+
     # Build agent list using detected name column
     if df_agents is not None:
         name_col = df_agents_canonmap.get('name', df_agents.columns[0])
@@ -1319,11 +1356,18 @@ def index():
     else:
         agent_list = [a[0] for a in agent_properties]
 
+    # Debug: Log what's in combined_images before rendering
+    app.logger.info(f"Rendering template with combined_images keys: {list(combined_images.keys())}")
+    app.logger.info(f"  abs_vs_evap: {'Present' if combined_images.get('abs_vs_evap') else 'None'}")
+    app.logger.info(f"  comparison_plot: {'Present (' + str(len(combined_images.get('comparison_plot', ''))) + ' bytes)' if combined_images.get('comparison_plot') else 'None'}")
+
     return render_template('index.html',
                             agent_list=agent_list,
                             selected_agents=selected_agents,
                             other_agents=other_agents,
                             applied_dose=applied_dose,
+                            td=td,
+                            tsim=tsim,
                             agent_info=agent_info,
                             combined_images=combined_images,
                             missing_properties={})

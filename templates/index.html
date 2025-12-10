@@ -176,6 +176,18 @@
           <input type="number" step="any" name="applied_dose" id="applied_dose" value="{{ applied_dose }}">
         </div>
 
+        <div class="form-group">
+          <label for="td">Decontamination Time - td (hours):</label>
+          <input type="number" step="any" name="td" id="td" value="{{ td if td else '0.0' }}" placeholder="0.0">
+          <div class="small-label">Time when RSDL decontamination is applied (0 = immediate)</div>
+        </div>
+
+        <div class="form-group">
+          <label for="tsim">Simulation Time - tsim (hours):</label>
+          <input type="number" step="any" name="tsim" id="tsim" value="{{ tsim if tsim else '25.0' }}" placeholder="25.0">
+          <div class="small-label">Total simulation duration</div>
+        </div>
+
         {% if missing_properties %}
         <div class="form-group" style="background: #fff3cd; padding: 12px; border-radius: 5px; border: 1px solid #ffc107;">
           <h3 style="margin-top: 0; color: #856404;">⚠ Missing Property Data</h3>
@@ -284,13 +296,31 @@
 
     <!-- Plots -->
     <div class="plot-card">
-      <h2 style="text-align:center;"></h2>
-      {% if combined_images.abs_vs_evap %}
-        <img src="data:image/png;base64,{{ combined_images.abs_vs_evap }}" alt="Absorption vs Evaporation">
-      {% else %}
-        <p style="text-align:center;color:#888;">Run a simulation to see dermal absorption results (Qabs, Qevap, Qtotal).
-        The right axis shows Qtotal as % of initial dose for one reference curve.</p>
-      {% endif %}
+      <h2 style="text-align:center;">Dermal Absorption Analysis</h2>
+      <div class="plots-grid">
+        <!-- Original Plot (Without Decontamination) -->
+        <div>
+          <h3 style="text-align:center;">Without Decontamination</h3>
+          {% if combined_images.abs_vs_evap %}
+            <img src="data:image/png;base64,{{ combined_images.abs_vs_evap }}" alt="Absorption vs Evaporation">
+          {% else %}
+            <p style="text-align:center;color:#888;">Run a simulation to see dermal absorption results (Qabs, Qevap, Qtotal).
+            The right axis shows Qtotal as % of initial dose for one reference curve.</p>
+          {% endif %}
+        </div>
+        
+        <!-- With Decontamination Plot -->
+        <div>
+          <h3 style="text-align:center;">With Decontamination</h3>
+          {% if combined_images.comparison_plot %}
+            <img src="data:image/png;base64,{{ combined_images.comparison_plot }}" alt="With Decontamination">
+          {% else %}
+            <p style="text-align:center;color:#888;">Dermal absorption with RSDL decontamination.
+            <br><strong>td</strong> = decontamination time (hours when RSDL is applied)
+            <br><strong>tsim</strong> = simulation duration (hours)</p>
+          {% endif %}
+        </div>
+      </div>
     </div>
   </div>
 
