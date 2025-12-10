@@ -28,7 +28,7 @@ app.logger.setLevel(logging.INFO)
 # -------------------------
 # Global plotting configuration
 # -------------------------
-PLOT_FIGSIZE = (14, 6)  # Increased width to accommodate legend
+PLOT_FIGSIZE = (10, 6)  # Uniform size with comparison plots
 PLOT_DPI = 120
 PLOT_LINEWIDTH = 1.8
 PLOT_GRID_STYLE = {'linestyle': '--', 'alpha': 0.6}
@@ -1008,8 +1008,8 @@ def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0, cus
     style_labels = ['Qabs', 'Qevap', 'Qtotal']
 
     ax.legend(handles_agents + style_handles, labels_agents + style_labels,
-              fontsize=PLOT_LEGEND_FS, frameon=True, loc='center left', 
-              bbox_to_anchor=(1.15, 0.5), borderaxespad=0, ncol=1)
+              fontsize=PLOT_LEGEND_FS, frameon=True, loc='upper center', 
+              bbox_to_anchor=(0.5, -0.15), borderaxespad=0, ncol=3)
 
     # Limits and title
     ax.set_xlim(left=0.0)
@@ -1025,11 +1025,10 @@ def combined_plot_dermal_absorption_original(agents, Mo=1e-3, tf_hours=25.0, cus
     if ymax:
         ax.set_ylim(bottom=0.0, top=ymax)
 
-    ax.set_title("Dermal absorption model", fontsize=PLOT_TITLE_FS + 2)
     apply_uniform_style(ax)
     
-    # Adjust layout to prevent legend overlap - leave space on the right
-    plt.subplots_adjust(right=0.75)
+    # Adjust layout to prevent legend overlap - leave space at bottom
+    plt.subplots_adjust(bottom=0.25)
     
     return fig_to_base64(fig)
 

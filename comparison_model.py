@@ -663,7 +663,6 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
         ax.set_xlim(left=0)
         ax.set_ylim(bottom=0)
         ax.grid(True, alpha=0.3)
-        ax.set_title(f"Dermal Absorption: {chemical_name}\nAbove Saturation (Two-Phase)", fontsize=14)
         
         # Right axis as % of Mo
         to_pct = lambda y: 100.0 * y / Mo
@@ -673,8 +672,8 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
         ax2.set_ylim(to_pct(ax.get_ylim()[0]), to_pct(ax.get_ylim()[1]))
         ax2.set_yticks([0, 25, 50, 75, 100])
         
-        ax.legend(loc='best', fontsize=10)
-        plt.tight_layout()
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), fontsize=10, ncol=2, frameon=True)
+        plt.subplots_adjust(bottom=0.25)
         
         # Convert to base64
         buf = io.BytesIO()
@@ -847,12 +846,6 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
         ax.set_ylim(bottom=0)
         ax.grid(True, alpha=0.3)
         
-        # Title with number of agents
-        if successful_agents == 1:
-            ax.set_title(f"Dermal Absorption WITH Decontamination\n{agents_to_run[0][0]}", fontsize=14)
-        else:
-            ax.set_title(f"Dermal Absorption WITH Decontamination\n({successful_agents} agents)", fontsize=14)
-        
         # Right axis as % of Mo
         to_pct = lambda y: 100.0 * y / dose
         from_pct = lambda p: (p / 100.0) * dose
@@ -861,11 +854,11 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
         ax2.set_ylim(to_pct(ax.get_ylim()[0]), to_pct(ax.get_ylim()[1]))
         ax2.set_yticks([0, 25, 50, 75, 100])
         
-        # Legend - place outside plot area
-        ax.legend(loc='center left', bbox_to_anchor=(1.15, 0.5), fontsize=9, frameon=True)
+        # Legend - place at bottom
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), fontsize=9, frameon=True, ncol=3)
         
         # Adjust layout to prevent legend cutoff
-        plt.subplots_adjust(right=0.70)
+        plt.subplots_adjust(bottom=0.25)
         
         # Convert to base64
         buf = io.BytesIO()
