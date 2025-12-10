@@ -1262,9 +1262,35 @@ def index():
                 D1 = (Pscw * h1 / Kscw) / 3600
                 Dsc = D1
                 
+                # K calculation diagnostic (matching terminal output)
+                kg_calc = None
+                K_calc = None
+                if Pvap is not None and Sw is not None:
+                    # Get atom counts for gas diffusivity
+                    formula = props.get('formula')
+                    smiles_str = props.get('SMILES')
+                    nc = props.get('nc', max(1, int(mw / 14)))
+                    nh = props.get('nh', max(1, int(mw / 7)))
+                    no = props.get('no', 1)
+                    nn = props.get('nn', 0)
+                    nring = props.get('nring', 0)
+                    
+                    # Gas phase transport
+                    R = 62.37
+                    T = 298.15
+                    u = 16.5
+                    L = 13.4
+                    Vp = Pvap * 133.322  # torr to Pa
+                    S = 16.5*nc + 1.98*nh + 5.69*nn + 5.48*no - 20.42*nring
+                    Dg = (10**(-3) * T**1.75 * (1/29 + 1/mw)**(1/2)) / (S**(1/3) + (20.1)**(1/3))**2
+                    kg_calc = (3260/3600) * Dg**(2/3) * np.sqrt(u/L)
+                    kp = Pscw
+                    K_calc = (kg_calc * Pvap * mw) / (R * T) * 1 / (kp * Sw) if (kp * Sw) > 0 else None
+                
             except Exception as e:
                 Msat, Kscw, Csat = (None, None, None)
                 logPscw, Pscw, D1, Dsc, h1 = (None, None, None, None, None)
+                kg_calc, K_calc = (None, None)
                 app.logger.debug("Failed to compute parameters for %s: %s", name, e)
 
             Mo = float(dose)
@@ -1308,6 +1334,15 @@ def index():
                 info_lines.append("Csat (sc): N/A")
             info_lines.append(f"Applied dose (Mo): {Mo:.3e} mg/cm²")
             info_lines.append(f"Status: {status}")
+            
+            # Add K calculation diagnostic
+            if kg_calc is not None and K_calc is not None:
+                info_lines.append("")  # Blank line for separation
+                info_lines.append("K Calculation Diagnostic:")
+                info_lines.append(f"  kg: {kg_calc:.6f} cm/s")
+                info_lines.append(f"  kp : {Pscw:.6f}" if Pscw is not None else "  kp: N/A")
+                info_lines.append(f"  K : {K_calc:.6f}")
+                
 
             info_text = "\n".join(info_lines)
             agent_info.append(info_text)
