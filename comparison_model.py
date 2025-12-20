@@ -12,7 +12,86 @@ import io
 import base64
 
 
-def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours=25.0, td_hours=0.0):
+def calculate_k_from_structure(chemical_name, MW, formula=None, SMILES=None, C_RSDL_M=0.01):
+    """
+    Simplified k calculation for common CWA agents.
+    Returns k in 1/s for use in dermal model.
+    
+    Based on literature RSDL reactivity data.
+    """
+    print(f"DEBUG calculate_k_from_structure: chemical_name='{chemical_name}', formula='{formula}'")
+    
+    # Known agent-specific k2 rates (M^-1 min^-1) from literature/estimates
+    known_k2 = {
+        # G-series nerve agents (very fast with RSDL)
+        'sarin': 180.0,
+        'gb': 180.0,
+        'soman': 150.0,
+        'gd': 150.0,
+        'tabun': 90.0,
+        'ga': 90.0,
+        # V-series nerve agents (fast but variable)
+        'vx': 50.0,
+        'vr': 45.0,
+        'vm': 40.0,
+        # Sulfur mustards (MUCH SLOWER with RSDL)
+        'sulfur mustard': 0.15,
+        'hd': 0.15,
+        'mustard': 0.15,
+        'bis(2-chloroethyl)sulfide': 0.1,  # Actual sulfur mustard structure
+        'sesquimustard': 0.1,
+        'q': 0.1,
+    }
+    
+    # Check if chemical name matches known agent
+    name_lower = chemical_name.lower()
+    k2 = None
+    for agent, rate in known_k2.items():
+        if agent in name_lower:
+            k2 = rate
+            break
+    
+    # Estimate based on formula if not found
+    if k2 is None and formula:
+        print(f"  DEBUG: Estimating k2 from formula: {formula}")
+        # Organophosphorus compounds (contains P)
+        if 'P' in formula:
+            if 'F' in formula:
+                k2 = 150.0  # G-series like (very reactive)
+            elif 'Cl' in formula:
+                k2 = 100.0
+            elif 'CN' in formula or ('C' in formula and 'N' in formula):
+                k2 = 80.0
+            elif 'S' in formula:
+                k2 = 30.0
+            else:
+                k2 = 10.0
+            print(f"  DEBUG: OP compound detected, k2 = {k2}")
+        # Halogenated compounds (contains Cl/Br/F but NOT P)
+        # Note: Check this BEFORE sulfur mustards to avoid misclassification
+        elif any(x in formula for x in ['Cl', 'Br', 'F']):
+            k2 = 0.01  # Low reactivity for general halogenated compounds
+            print(f"  DEBUG: Halogenated compound detected, k2 = {k2}")
+        # Sulfur compounds (contains S but not halogenated OP)
+        elif 'S' in formula:
+            k2 = 0.001  # Very low reactivity
+            print(f"  DEBUG: Sulfur compound detected, k2 = {k2}")
+        else:
+            k2 = 0.001  # Very low reactivity
+            print(f"  DEBUG: Generic compound, k2 = {k2}")
+    
+    # Final fallback
+    if k2 is None:
+        k2 = 0.001
+    
+    # Convert k2 (M^-1 min^-1) to k (s^-1)
+    k_per_min = k2 * C_RSDL_M
+    k = k_per_min / 60.0
+    
+    return k
+
+
+def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours=25.0, td_hours=0.0, SMILES=None, formula=None):
     """
     Run dermal absorption simulation WITH decontamination using comprehensive model.
     This is the EXACT model from your comprehensive code, adapted for web app use.
@@ -35,6 +114,10 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
         Total simulation time (hours)
     td_hours : float
         Decontamination activation time (hours)
+    SMILES : str, optional
+        SMILES string for structure-based k calculation
+    formula : str, optional
+        Chemical formula for k calculation
     
     Returns:
     --------
@@ -47,16 +130,31 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
         td = td_hours * 3600.0   # seconds
         
         # Fixed system parameters (EXACT from comprehensive model)
-        hsc = 13.4 * 1e-4  # cm
+        hsc = 13.4 * 1e-4  # cm (stratum corneum thickness)
         h1 = hsc
         fdep = 0.1
         u = 16.5
-        L = 13.4  # cm  
+        L = 13.4  # cm - air boundary layer for gas phase (kg calculation)
         R = 62.37
         T = 298.15
         
-        # Decontamination parameters (from comprehensive model)
-        k = 0.008 / 3600.0  # bulk reaction rate (/second)
+        # Decontamination parameters - calculate chemical-specific k
+        C_RSDL_M = 0.01  # Default RSDL concentration (Molarity)
+        
+        # Try to calculate chemical-specific k
+        try:
+            k = calculate_k_from_structure(
+                chemical_name=chemical_name,
+                MW=MW,
+                formula=formula,
+                SMILES=SMILES,
+                C_RSDL_M=C_RSDL_M
+            )
+            print(f"✓ Calculated chemical-specific k = {k:.3e} s⁻¹")
+        except Exception as e:
+            print(f"⚠ Could not calculate chemical-specific k: {e}")
+            k = 0.008 / 3600.0  # Fallback default
+            print(f"⚠ Using default k = {k:.3e} s⁻¹")
         
         # Derived properties (EXACT formulas from comprehensive model)
         Kow = 10.0**logKow
@@ -86,10 +184,13 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
         
         # Evaporation coefficient K (EXACT from comprehensive model)
         K = (kg * Pvap * MW) / (R * T) * 1 / (kp * Sw)
-        chi_evap_const = K
+        print(f"DEBUG K calculation:")
+        print(f"  kg={kg:.6e}, Pvap={Pvap:.6e}, MW={MW:.6e}")
+        print(f"  R={R:.6e}, T={T:.6e}, kp={kp:.6e}, Sw={Sw:.6e}")
+        print(f"  K = {K:.6f}")
         
-        # Surface reaction term  
-        ks = k * L * Ksc
+        # Note: chi = K + k*hsc²*Ksc/Dsc (hsc is stratum corneum thickness)
+        # ks_eff = k * hsc * Ksc (computed inline in RHS functions)
         
         # Saturation check
         Msat = fdep * hsc * Csat
@@ -103,8 +204,8 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
         def k_eff_of(t, k_val, td_sec):
             return k_val * heaviside_on(t, td_sec)
         
-        def ks_eff_of(t, k_val, L_val, Ksc_val, td_sec):
-            return (k_val * L_val * Ksc_val) * heaviside_on(t, td_sec)
+        def ks_eff_of(t, k_val, L_sc_val, Ksc_val, td_sec):
+            return (k_val * L_sc_val * Ksc_val) * heaviside_on(t, td_sec)
         
         # =============================================================
         # ABOVE SATURATION: Phase 1 -> Phase 2 (EXACT from comprehensive model)
@@ -114,15 +215,15 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
             def phase1_rhs(t, y):
                 Ts2, Ts3, Ts4, Ts5, Ts6, Ts7, Ts8, Ts9, Ts10, Ts11, Qt, Qst, Qevap, Qreact = y
                 
-                # Activation
+                # Activation (use hsc for surface reaction as in comprehensive model)
                 on = 1.0 if (t >= td) else 0.0
                 k_eff = k * on
-                ks_eff = (k * L * Ksc) * on
+                ks_eff = (k * hsc * Ksc) * on  # ks = k * hsc * Ksc
+                chi = K + (hsc / Dsc) * ks_eff  # chi = K + k*hsc²*Ksc/Dsc
                 
                 # Phase 1: Constant Csat boundary
-                evap_rate = chi_evap_const * Dsc * Csat / hsc
-                surf_react_rate = ks_eff * Csat
-                kevaprho = evap_rate + surf_react_rate
+                kevaprho = (Dsc * Csat / hsc) * chi  # Total flux = (Dsc*Csat/hsc) * chi
+                evap_rate = K * Dsc * Csat / hsc  # Evaporation component
                 kevap = evap_rate
                 
                 denom = (h1 - fdep * hsc)**2
@@ -252,9 +353,11 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
                 def phase2_rhs(t2, y2):
                     Vr2, Vr3, Vr4, Vr5, Vr6, Vr7, Vr8, Vr9, Vr10, Vr11, Qt, Qevap, Qreact = y2
                     
+                    # Activation & chi (matching comprehensive model formulation)
                     keff = k_eff_of(t2, k, td)
-                    ks_eff = ks_eff_of(t2, k, L, Ksc, td)
-                    chi = K + (L / Dsc) * ks_eff
+                    on_val = 1.0 if (t2 >= td) else 0.0
+                    ks_eff = (k * hsc * Ksc) * on_val  # ks = k * hsc * Ksc
+                    chi = K + (hsc / Dsc) * ks_eff  # chi = K + k*hsc²*Ksc/Dsc
                     
                     common_denom = -(110.997/hsc) - (1.0 * chi)/hsc
                     flux_term = (0.0 - (123.321 * Vr2)/hsc + (16.1502 * Vr3)/hsc -
@@ -342,25 +445,26 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
                     
                     if sol2.success and sol2.y.size > 0:
                         t2 = sol2.t
-                        Q1t_p2, Qet_p2, Qreact2 = sol2.y[10], sol2.y[11], sol2.y[12]
+                        Qt_p2, Qevap_p2, Qreact_p2 = sol2.y[10], sol2.y[11], sol2.y[12]
+                        
                         t_combined = np.concatenate([t1, t2 + ttrans])
-                        Qt_combined = np.concatenate([Qt1, Q1t_p2])
-                        Qet_combined = np.concatenate([Qevap1, Qet_p2])
-                        Qreact_combined = np.concatenate([Qreact1, Qreact2])
+                        Qt_combined = np.concatenate([Qt1, Qt_p2])
+                        Qst_combined = np.concatenate([Qst1, Qevap_p2])  # Phase2 uses Qevap for total
+                        Qreact_combined = np.concatenate([Qreact1, Qreact_p2])
                     else:
                         t_combined = t1
                         Qt_combined = Qt1
-                        Qet_combined = Qevap1
+                        Qst_combined = Qst1
                         Qreact_combined = Qreact1
                 else:
                     t_combined = t1
                     Qt_combined = Qt1
-                    Qet_combined = Qevap1
+                    Qst_combined = Qst1
                     Qreact_combined = Qreact1
             else:
                 t_combined = t1
                 Qt_combined = Qt1
-                Qet_combined = Qevap1
+                Qst_combined = Qst1
                 Qreact_combined = Qreact1
         
         # =============================================================
@@ -377,10 +481,11 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
                 Ts = y[0:10]
                 Tv = y[10:20]
                 
-                # Activation & chi
+                # Activation & chi (matching comprehensive model formulation)
                 keff = k_eff_of(t, k, td)
-                ks_eff = ks_eff_of(t, k, L, Ksc, td)
-                chi = K + (L / Dsc) * ks_eff
+                on_val = 1.0 if (t >= td) else 0.0
+                ks_eff = (k * hsc * Ksc) * on_val  # ks = k * hsc * Ksc
+                chi = K + (hsc / Dsc) * ks_eff  # chi = K + k*hsc²*Ksc/Dsc
                 
                 denom1 = ((111.0 * D1) / (fdep * h) +
                          (110.997 * D1) / (h - 1.0 * fdep * h) +
@@ -612,26 +717,41 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
             
             t_combined = solb.t
             Qt_combined = solb.y[20]      # Qabs
-            Qet_combined = solb.y[21]     # Qevap
+            Qst_combined = solb.y[21]     # Total top surface loss (includes chi)
             Qreact_combined = solb.y[22]  # Qreact
         
         # =============================================================
         # POST-PROCESSING (EXACT from comprehensive model)
         # =============================================================
         Qabs = Qt_combined
-        Qlosstop = Qet_combined
+        Qlosstop = Qst_combined  # Total top surface loss
         Qreact = Qreact_combined
         Qremain = Mo - (Qabs + Qlosstop + Qreact)
         Qremain = np.maximum(Qremain, 0.0)
         
-        # Decompose Qlosstop into evaporation and surface reaction
+        # Decompose Qlosstop using chi ratio (evaporation vs surface reaction)
+        # CRITICAL: Original code uses hsc in decomposition, NOT the L used in ODEs
+        # This creates the observed 75/25 evap/react split
         Qlosstop_evap = np.zeros_like(Qlosstop)
         Qlosstop_react = np.zeros_like(Qlosstop)
         
+        # DIAGNOSTIC: Print decomposition calculation details at final time
+        print(f"\n{'='*60}")
+        print(f"DECOMPOSITION DIAGNOSTIC (at t={t_combined[-1]/3600:.2f} h)")
+        print(f"{'='*60}")
+        print(f"k = {k:.6e} s⁻¹")
+        print(f"L (air boundary layer, for kg only) = {L:.6e} cm")
+        print(f"hsc (stratum corneum thickness, used in chi) = {hsc:.6e} cm")
+        print(f"Ksc = {Ksc:.6f}")
+        print(f"Dsc = {Dsc:.6e} cm²/s")
+        print(f"K (evap coeff) = {K:.6f}")
+        print(f"td = {td:.2f} s ({td/3600:.2f} h)")
+        
         for i, t in enumerate(t_combined):
-            ks_eff_t = ks_eff_of(t, k, L, Ksc, td)
-            K_term = K
-            ks_term = (hsc / Dsc) * ks_eff_t
+            on_val = 1.0 if (t >= td) else 0.0
+            ks_eff_t = (k * hsc * Ksc) * on_val  # ks = k * hsc * Ksc (matches notebook)
+            K_term = K  # Evaporation is always active (matches Jupyter notebook)
+            ks_term = (hsc / Dsc) * ks_eff_t  # chi term calculation (matches notebook)
             chi_t = K_term + ks_term
             
             if chi_t > 0:
@@ -639,6 +759,25 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
                 react_frac = ks_term / chi_t
                 Qlosstop_evap[i] = evap_frac * Qlosstop[i]
                 Qlosstop_react[i] = react_frac * Qlosstop[i]
+            else:
+                # This should never happen since K_term is always > 0
+                Qlosstop_evap[i] = Qlosstop[i]  # All evaporation if no reaction
+                Qlosstop_react[i] = 0.0
+                
+            # Print details at final time
+            if i == len(t_combined) - 1:
+                print(f"\nAt final time (t={t/3600:.2f} h):")
+                print(f"  on_val = {on_val}")
+                print(f"  ks_eff_t = k * hsc * Ksc * on_val = {ks_eff_t:.6e}")
+                print(f"  K_term = {K_term:.6f}")
+                print(f"  ks_term = (hsc/Dsc) * ks_eff_t = {ks_term:.6f}")
+                print(f"  chi_t = K_term + ks_term = {chi_t:.6f}")
+                print(f"  evap_frac = K_term / chi_t = {evap_frac:.6f}")
+                print(f"  react_frac = ks_term / chi_t = {react_frac:.6f}")
+                print(f"  Qlosstop[final] = {Qlosstop[i]:.6e} mg/cm²")
+                print(f"  Qlosstop_evap[final] = {Qlosstop_evap[i]:.6e} mg/cm²")
+                print(f"  Qlosstop_react[final] = {Qlosstop_react[i]:.6e} mg/cm²")
+        print(f"{'='*60}\n")
         
         t_hours = t_combined / 3600.0
         
@@ -682,9 +821,23 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
         img_base64 = base64.b64encode(buf.read()).decode('utf-8')
         plt.close(fig)
         
+        # Calculate final values and statistics
+        Qabs_final = Qabs[-1]
+        Qlosstop_final = Qlosstop[-1]
+        Qlosstop_evap_final = Qlosstop_evap[-1]
+        Qlosstop_react_final = Qlosstop_react[-1]
+        Qreact_final = Qreact[-1]
+        Qremain_final = Qremain[-1]
+        
+        mass_balance_total = Qabs_final + Qlosstop_final + Qreact_final + Qremain_final
+        evap_frac = Qlosstop_evap_final / Qlosstop_final if Qlosstop_final > 0 else 0
+        react_frac = Qlosstop_react_final / Qlosstop_final if Qlosstop_final > 0 else 0
+        top_loss_frac = Qlosstop_final / (Qlosstop_final + Qreact_final) if (Qlosstop_final + Qreact_final) > 0 else 0
+        bulk_loss_frac = Qreact_final / (Qlosstop_final + Qreact_final) if (Qlosstop_final + Qreact_final) > 0 else 0
+        
         print(f"✓ Comparison plot generated successfully for {chemical_name}")
         print(f"  Image size: {len(img_base64)} bytes (base64)")
-        print(f"  Final values: Qabs={Qabs[-1]:.3e}, Qremain={Qremain[-1]:.3e}")
+        print(f"  Final values: Qabs={Qabs_final:.3e}, Qremain={Qremain_final:.3e}")
         
         return {
             'comparison_plot': img_base64,
@@ -698,6 +851,24 @@ def run_comparison_simulation(MW, logKow, Pvap, Sw, Mo, chemical_name, sim_hours
                 'Qreact': Qreact,
                 'Qremain': Qremain,
                 'Mo': Mo
+            },
+            # Summary statistics
+            'summary': {
+                'Qabs_final': Qabs_final,
+                'Qlosstop_final': Qlosstop_final,
+                'Qlosstop_evap_final': Qlosstop_evap_final,
+                'Qlosstop_react_final': Qlosstop_react_final,
+                'Qreact_final': Qreact_final,
+                'Qremain_final': Qremain_final,
+                'mass_balance_total': mass_balance_total,
+                'evap_frac': evap_frac,
+                'react_frac': react_frac,
+                'top_loss_frac': top_loss_frac,
+                'bulk_loss_frac': bulk_loss_frac,
+                'Mo': Mo,
+                'sim_hours': sim_hours,
+                'td_hours': td_hours,
+                'chemical_name': chemical_name
             }
         }
         
@@ -733,7 +904,7 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
     --------
     dict with 'comparison_plot' (base64 PNG) and 'status'
     """
-    from app.app import get_agent_data, pubchem_lookup, safe_pubchem_prop
+    from app import get_agent_data, pubchem_lookup, safe_pubchem_prop
     
     if custom_properties is None:
         custom_properties = {}
@@ -789,10 +960,15 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
                 print(f"Multi-agent comparison - Agent {i+1}/{len(agents_to_run)}: {name}")
                 print(f"MW={MW}, logKow={logKow}, Pvap={Pvap}, Sw={Sw}")
                 
+                # Get SMILES and formula for k calculation
+                SMILES = props.get('SMILES', None)
+                formula = props.get('formula', None)
+                
                 # Run single-agent simulation (which now returns data too)
                 result = run_comparison_simulation(
                     MW=MW, logKow=logKow, Pvap=Pvap, Sw=Sw, Mo=dose,
-                    chemical_name=name, sim_hours=sim_hours, td_hours=td_hours
+                    chemical_name=name, sim_hours=sim_hours, td_hours=td_hours,
+                    SMILES=SMILES, formula=formula
                 )
                 
                 if result is None or result.get('status') != 'success' or 'data' not in result:
@@ -812,10 +988,18 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
                 
                 # Plot with unique color per agent
                 color = cmap(i % cmap.N)
-                ax.plot(t_hr, Qabs, color=color, linestyle='-', linewidth=2.0, label=f'{name} — Qabs')
-                ax.plot(t_hr, Qlosstop_evap, color=color, linestyle='--', linewidth=1.5, alpha=0.8, label=f'{name} — Qevap')
-                ax.plot(t_hr, Qreact, color=color, linestyle=':', linewidth=1.5, alpha=0.8, label=f'{name} — Qreact')
-                ax.plot(t_hr, Qremain, color=color, linestyle='-.', linewidth=2.0, alpha=0.9, label=f'{name} — Qremain')
+                
+                # Use distinct line styles for different quantities
+                ax.plot(t_hr, Qabs, color=color, linestyle='-', linewidth=2.5, 
+                       label=f'{name} — Absorbed' if len(agents_to_run) > 1 else 'Absorbed')
+                ax.plot(t_hr, Qlosstop_evap, color=color, linestyle='--', linewidth=2.0, 
+                       label=f'{name} — Evaporation' if len(agents_to_run) > 1 else 'Evaporation')
+                ax.plot(t_hr, Qlosstop_react, color=color, linestyle='-.', linewidth=2.0, 
+                       label=f'{name} — Surface Rxn' if len(agents_to_run) > 1 else 'Surface Rxn')
+                ax.plot(t_hr, Qreact, color=color, linestyle=':', linewidth=2.0, 
+                       label=f'{name} — Bulk Rxn' if len(agents_to_run) > 1 else 'Bulk Rxn')
+                ax.plot(t_hr, Qremain, color=color, linestyle='-', linewidth=1.5, alpha=0.5,
+                       label=f'{name} — Remaining' if len(agents_to_run) > 1 else 'Remaining')
                 
                 successful_agents += 1
                 print(f"✓ Successfully plotted {name}")
@@ -836,8 +1020,12 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
         
         # Add RSDL activation line
         if td_hours > 0:
-            ax.axvline(x=td_hours, color='red', linestyle='--', linewidth=1.5, alpha=0.7, 
-                      label=f'RSDL activated (t={td_hours}h)')
+            ax.axvline(x=td_hours, color='red', linestyle='--', linewidth=2.0, alpha=0.7, 
+                      label=f'RSDL activated (t={td_hours:.1f}h)', zorder=10)
+        
+        # Add initial dose reference line
+        ax.axhline(y=dose, color='black', linestyle=':', linewidth=1.5, alpha=0.5, 
+                  label=f'Initial dose (Mo={dose:.2e})', zorder=5)
         
         # Format plot
         ax.set_xlabel("Time (hours)", fontsize=12)
@@ -845,6 +1033,13 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
         ax.set_xlim(left=0)
         ax.set_ylim(bottom=0)
         ax.grid(True, alpha=0.3)
+        
+        # Add title
+        if len(agents_to_run) == 1:
+            title = f"Dermal Absorption with Decontamination: {agents_to_run[0][0]}"
+        else:
+            title = f"Multi-Agent Comparison ({successful_agents} agents)"
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=15)
         
         # Right axis as % of Mo
         to_pct = lambda y: 100.0 * y / dose
@@ -854,11 +1049,20 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
         ax2.set_ylim(to_pct(ax.get_ylim()[0]), to_pct(ax.get_ylim()[1]))
         ax2.set_yticks([0, 25, 50, 75, 100])
         
-        # Legend - place at bottom
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), fontsize=9, frameon=True, ncol=3)
+        # Legend - place at bottom with better formatting
+        if len(agents_to_run) == 1:
+            # For single agent, simple legend outside plot area
+            ax.legend(loc='upper left', bbox_to_anchor=(1.15, 1.0), fontsize=10, 
+                     frameon=True, shadow=True, borderpad=1)
+        else:
+            # For multiple agents, compact legend at bottom
+            ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), fontsize=9, 
+                     frameon=True, ncol=min(3, successful_agents))
         
         # Adjust layout to prevent legend cutoff
-        plt.subplots_adjust(bottom=0.25)
+        plt.tight_layout()
+        if len(agents_to_run) > 1:
+            plt.subplots_adjust(bottom=0.25)
         
         # Convert to base64
         buf = io.BytesIO()
@@ -870,9 +1074,20 @@ def run_comparison_simulation_multi(agents_to_run, dose, sim_hours, td_hours, cu
         print(f"\n✓ Multi-agent comparison plot generated for {successful_agents}/{len(agents_to_run)} agent(s)")
         print(f"  Image size: {len(img_base64)} bytes (base64)")
         
+        # Collect summaries from all agents
+        agent_summaries = []
+        for agent_name, agent_data in all_agent_results:
+            agent_summaries.append({
+                'chemical_name': agent_name,
+                'data': agent_data
+            })
+        
         return {
             'comparison_plot': img_base64,
-            'status': 'success'
+            'status': 'success',
+            'agent_summaries': agent_summaries,
+            'sim_hours': sim_hours,
+            'td_hours': td_hours
         }
         
     except Exception as e:

@@ -1375,6 +1375,43 @@ def index():
                 if comparison_result and comparison_result.get('comparison_plot'):
                     combined_images['comparison_plot'] = comparison_result['comparison_plot']
                     app.logger.info(f"✓ Comparison plot added to combined_images (size: {len(comparison_result['comparison_plot'])} bytes)")
+                    
+                    # Add simulation summaries to agent_info
+                    if 'agent_summaries' in comparison_result:
+                        for summary_data in comparison_result['agent_summaries']:
+                            chem_name = summary_data['chemical_name']
+                            data = summary_data['data']
+                            
+                            # Calculate final values
+                            Qabs_final = data['Qabs'][-1]
+                            Qlosstop_evap_final = data['Qlosstop_evap'][-1]
+                            Qlosstop_react_final = data['Qlosstop_react'][-1]
+                            Qlosstop_final = Qlosstop_evap_final + Qlosstop_react_final
+                            Qreact_final = data['Qreact'][-1]
+                            Qremain_final = data['Qremain'][-1]
+                            Mo = data['Mo']
+                            
+                            mass_balance = Qabs_final + Qlosstop_final + Qreact_final + Qremain_final
+                            evap_frac = Qlosstop_evap_final / Qlosstop_final if Qlosstop_final > 0 else 0
+                            react_frac = Qlosstop_react_final / Qlosstop_final if Qlosstop_final > 0 else 0
+                            top_frac = Qlosstop_final / (Qlosstop_final + Qreact_final) if (Qlosstop_final + Qreact_final) > 0 else 0
+                            bulk_frac = Qreact_final / (Qlosstop_final + Qreact_final) if (Qlosstop_final + Qreact_final) > 0 else 0
+                            
+                            summary_lines = [
+                                f"\n=== Simulation Results: {chem_name} ===",
+                                f"Final absorbed (Qabs):             {Qabs_final:.6f} mg/cm²",
+                                f"Final top surface loss (Qlosstop): {Qlosstop_final:.6f} mg/cm²",
+                                f"  - Evaporation component:         {Qlosstop_evap_final:.6f} mg/cm²",
+                                f"  - Surface reaction component:    {Qlosstop_react_final:.6f} mg/cm²",
+                                f"Final bulk reaction (Qreact):      {Qreact_final:.6f} mg/cm²",
+                                f"Final remaining (Qremain):         {Qremain_final:.6f} mg/cm²",
+                                f"Check: Qabs+Qlosstop+Qreact+Qremain = {mass_balance:.6f} mg/cm² (should equal Mo = {Mo:.6f})",
+                                f"Top surface split (evap / surface rxn): {evap_frac:.6f} / {react_frac:.6f}",
+                                f"Check: Qlosstop_evap + Qlosstop_react = {Qlosstop_evap_final + Qlosstop_react_final:.6f} mg/cm² (should equal Qlosstop = {Qlosstop_final:.6f})",
+                                f"Loss channel split (top surface / bulk): {top_frac:.6f} / {bulk_frac:.6f}",
+                                f"Total simulation time: {tsim_hours:.4f} h"
+                            ]
+                            agent_info.append("\n".join(summary_lines))
                 else:
                     app.logger.error(f"✗ Comparison plot is None or empty! Status: {comparison_result.get('status', 'unknown')}")
                 
